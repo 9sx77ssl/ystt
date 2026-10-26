@@ -66,10 +66,23 @@ pub struct YsttConfig {
     pub reuse_existing: bool,
     /// Enable the content-addressed file cache.
     pub file_cache: bool,
-    /// Optional file-cache root. `None` means `<output_dir>/.ystt-cache`.
+    /// Optional shared cache root for file and metadata caches.
+    ///
+    /// When set, the file cache uses `<cache_dir>/files` and metadata uses
+    /// `<cache_dir>/metadata`, so different output directories share one cache.
+    pub cache_dir: Option<PathBuf>,
+    /// Optional file-cache root. `None` means `<cache_dir>/files` or
+    /// `<output_dir>/.ystt-cache`.
     pub file_cache_dir: Option<PathBuf>,
     /// File-cache TTL.
     pub file_cache_ttl: Duration,
+    /// Cache resolved metadata and signed URLs across processes.
+    pub metadata_cache: bool,
+    /// Optional metadata-cache root. `None` means `<cache_dir>/metadata` or the
+    /// platform user cache directory.
+    pub metadata_cache_dir: Option<PathBuf>,
+    /// Metadata-cache TTL ceiling. Signed-URL expiry may shorten it.
+    pub metadata_cache_ttl: Duration,
     /// Try the lightweight embed resolver before the full page.
     pub use_embed: bool,
     /// Advanced: override the page origin (for local integration tests or mirrors).
@@ -106,8 +119,12 @@ impl Default for YsttConfig {
             cache_ttl: Duration::from_secs(10 * 60),
             reuse_existing: false,
             file_cache: true,
+            cache_dir: None,
             file_cache_dir: None,
             file_cache_ttl: Duration::from_secs(24 * 60 * 60),
+            metadata_cache: true,
+            metadata_cache_dir: None,
+            metadata_cache_ttl: Duration::from_secs(10 * 60),
             page_origin: None,
             use_embed: false,
             media_retries: 2,
@@ -142,6 +159,8 @@ pub struct DownloadOptions {
     pub reuse_existing: Option<bool>,
     /// Enable or disable the file cache.
     pub file_cache: Option<bool>,
+    /// Enable or disable the persistent metadata cache.
+    pub metadata_cache: Option<bool>,
     /// Retry budget per media item.
     pub media_retries: Option<u32>,
     /// Allow partial gallery results.
@@ -167,6 +186,7 @@ impl std::fmt::Debug for DownloadOptions {
             .field("max_bytes", &self.max_bytes)
             .field("reuse_existing", &self.reuse_existing)
             .field("file_cache", &self.file_cache)
+            .field("metadata_cache", &self.metadata_cache)
             .field("media_retries", &self.media_retries)
             .field("allow_partial", &self.allow_partial)
             .field("adaptive_ranges", &self.adaptive_ranges)
@@ -236,6 +256,12 @@ impl DownloadOptions {
         self
     }
 
+    /// Enable or disable the persistent metadata cache.
+    pub fn metadata_cache(mut self, enabled: bool) -> Self {
+        self.metadata_cache = Some(enabled);
+        self
+    }
+
     /// Set the per-media retry budget.
     pub fn media_retries(mut self, retries: u32) -> Self {
         self.media_retries = Some(retries);
@@ -279,6 +305,8 @@ mod tests {
         assert!(config.parallel_ranges);
         assert_eq!(config.max_connections, 6);
         assert_eq!(config.range_threshold, 64 * 1024 * 1024);
+        assert!(config.metadata_cache);
+        assert!(config.cache_dir.is_none());
     }
 
     #[test]

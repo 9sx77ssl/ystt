@@ -9,7 +9,10 @@ mod support;
 
 use std::sync::atomic::Ordering;
 
-use ystt::{DownloadOptions, MediaKind, ProgressEvent, Ystt, YsttError, progress_channel};
+use ystt::{
+    BatchOptions, DownloadOptions, MediaKind, ProgressEvent, TransferKind, Ystt, YsttError,
+    progress_channel,
+};
 
 fn video_url() -> &'static str {
     "https://www.tiktok.com/@test/video/123"
@@ -17,6 +20,10 @@ fn video_url() -> &'static str {
 
 fn gallery_url() -> &'static str {
     "https://www.tiktok.com/@test/video/456"
+}
+
+fn video_url_two() -> &'static str {
+    "https://www.tiktok.com/@test/video/124"
 }
 
 async fn build(server: &support::TestServer, dir: &std::path::Path) -> Ystt {
@@ -30,6 +37,7 @@ async fn build(server: &support::TestServer, dir: &std::path::Path) -> Ystt {
         .max_connections(4)
         .file_cache(true)
         .file_cache_dir(dir.join("cache"))
+        .metadata_cache(false)
         .build()
         .unwrap()
 }
@@ -67,6 +75,16 @@ async fn video_ranges_cookies_progress_and_file_cache() {
         server.counters.media.load(Ordering::Relaxed),
         server.counters.ranges.load(Ordering::Relaxed)
     );
+    assert!(result.metrics.iter().any(|metric| {
+        metric.kind == TransferKind::Page
+            && metric.protocol == "HTTP/1.1"
+            && metric.host == "127.0.0.1"
+    }));
+    assert!(result.metrics.iter().any(|metric| {
+        metric.kind == TransferKind::Video
+            && metric.bytes == support::VIDEO_SIZE as u64
+            && metric.throughput_bps > 0
+    }));
 
     let mut started = false;
     let mut progressed = false;
@@ -113,6 +131,7 @@ async fn audio_downloads_through_the_same_pipeline() {
         .output_dir(dir.path())
         .page_origin(server.origin.clone())
         .file_cache(false)
+        .metadata_cache(false)
         .build()
         .unwrap();
 
@@ -132,6 +151,129 @@ async fn audio_downloads_through_the_same_pipeline() {
     let bytes = tokio::fs::read(&audio.path).await.unwrap();
     assert!(bytes.starts_with(b"ID3"));
     assert!(result.failures.is_empty());
+    assert!(
+        result
+            .metrics
+            .iter()
+            .any(|metric| metric.kind == TransferKind::Audio)
+    );
+}
+
+#[tokio::test]
+async fn metadata_cache_is_shared_between_instances() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let metadata = tempfile::tempdir().unwrap();
+
+    let build = || {
+        Ystt::builder()
+            .output_dir(dir.path())
+            .page_origin(server.origin.clone())
+            .file_cache(false)
+            .metadata_cache_dir(metadata.path())
+            .metadata_cache_ttl(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap()
+    };
+
+    let first = build()
+        .download_with(video_url(), DownloadOptions::new().output_dir(dir.path()))
+        .await
+        .unwrap();
+    assert!(first.video.is_some());
+    assert_eq!(server.counters.pages.load(Ordering::Relaxed), 1);
+
+    // A new process equivalent: no in-memory cache, same persistent metadata.
+    let second = build()
+        .download_with(video_url(), DownloadOptions::new().output_dir(dir.path()))
+        .await
+        .unwrap();
+    assert!(second.video.is_some());
+    assert_eq!(
+        server.counters.pages.load(Ordering::Relaxed),
+        1,
+        "metadata hit must skip the page request"
+    );
+    assert_eq!(server.counters.media.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn shared_file_cache_works_across_output_directories() {
+    let server = support::start().await;
+    let cache = tempfile::tempdir().unwrap();
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+
+    let first = Ystt::builder()
+        .output_dir(first_dir.path())
+        .page_origin(server.origin.clone())
+        .cache_dir(cache.path())
+        .metadata_cache(false)
+        .build()
+        .unwrap()
+        .download_with(
+            video_url(),
+            DownloadOptions::new().output_dir(first_dir.path()),
+        )
+        .await
+        .unwrap();
+    assert!(!first.cache_hit);
+
+    let second = Ystt::builder()
+        .output_dir(second_dir.path())
+        .page_origin(server.origin.clone())
+        .cache_dir(cache.path())
+        .metadata_cache(false)
+        .build()
+        .unwrap()
+        .download_with(
+            video_url(),
+            DownloadOptions::new().output_dir(second_dir.path()),
+        )
+        .await
+        .unwrap();
+
+    assert!(second.cache_hit);
+    assert_eq!(server.counters.pages.load(Ordering::Relaxed), 1);
+    assert_eq!(server.counters.media.load(Ordering::Relaxed), 1);
+    assert!(second.video.unwrap().path.starts_with(second_dir.path()));
+}
+
+#[tokio::test]
+async fn batch_preserves_order_and_reports_errors() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+
+    let urls = [
+        video_url(),
+        "https://www.tiktok.com/@test/video/999",
+        video_url_two(),
+    ];
+    let batch = ystt
+        .download_many(
+            urls,
+            BatchOptions::new().output_dir(dir.path()).concurrency(2),
+        )
+        .await;
+
+    assert_eq!(batch.items.len(), 3);
+    assert_eq!(batch.successes(), 2);
+    assert_eq!(batch.failures(), 1);
+    assert_eq!(batch.items[0].url, video_url());
+    assert!(batch.items[0].result.is_some());
+    assert!(batch.items[1].result.is_none());
+    assert_eq!(
+        batch.items[1].error.as_ref().map(|error| error.code),
+        Some("unavailable")
+    );
+    assert_eq!(batch.items[2].url, video_url_two());
 }
 
 #[tokio::test]
@@ -143,6 +285,7 @@ async fn embed_resolver_can_be_forced() {
         .page_origin(server.origin.clone())
         .use_embed(true)
         .file_cache(false)
+        .metadata_cache(false)
         .build()
         .unwrap();
 
@@ -165,6 +308,7 @@ async fn full_page_fallback_uses_session_cookies() {
         .page_origin(server.origin.clone())
         .use_embed(false)
         .file_cache(false)
+        .metadata_cache(false)
         .build()
         .unwrap();
 

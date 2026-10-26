@@ -18,6 +18,7 @@ pub struct Counters {
     pub total: AtomicUsize,
     pub ranges: AtomicUsize,
     pub media: AtomicUsize,
+    pub pages: AtomicUsize,
 }
 
 pub struct TestServer {
@@ -64,8 +65,23 @@ async fn handle(mut socket: TcpStream, origin: &str, counters: &Counters) {
 
     match path.split('?').next().unwrap_or(path) {
         "/@test/video/123" => {
-            counters.media.fetch_add(0, Ordering::Relaxed);
-            let page = video_page(origin);
+            counters.pages.fetch_add(1, Ordering::Relaxed);
+            let page = video_page(origin, "123");
+            write_response(
+                &mut socket,
+                200,
+                &[
+                    ("Content-Type", "text/html; charset=utf-8"),
+                    ("Set-Cookie", "ttwid=test; Path=/"),
+                    ("Set-Cookie", "tt_chain_token=test; Path=/"),
+                ],
+                page.as_bytes(),
+            )
+            .await;
+        }
+        "/@test/video/124" => {
+            counters.pages.fetch_add(1, Ordering::Relaxed);
+            let page = video_page(origin, "124");
             write_response(
                 &mut socket,
                 200,
@@ -79,6 +95,7 @@ async fn handle(mut socket: TcpStream, origin: &str, counters: &Counters) {
             .await;
         }
         "/embed/v2/123" => {
+            counters.pages.fetch_add(1, Ordering::Relaxed);
             let page = embed_video_page(origin);
             write_response(
                 &mut socket,
@@ -93,6 +110,7 @@ async fn handle(mut socket: TcpStream, origin: &str, counters: &Counters) {
             serve_video(&mut socket, &headers, counters).await;
         }
         "/@test/video/456" => {
+            counters.pages.fetch_add(1, Ordering::Relaxed);
             let page = gallery_page(origin);
             write_response(
                 &mut socket,
@@ -224,7 +242,7 @@ fn mp3() -> Vec<u8> {
     body
 }
 
-fn video_page(origin: &str) -> String {
+fn video_page(origin: &str, id: &str) -> String {
     let media = format!("{origin}/media/video.mp4");
     let audio = format!("{origin}/media/audio.mp3");
     format!(
@@ -236,7 +254,7 @@ fn video_page(origin: &str) -> String {
       "statusMsg": "",
       "itemInfo": {{
         "itemStruct": {{
-          "id": "123",
+          "id": "{id}",
           "desc": "integration video",
           "author": {{ "uniqueId": "test", "nickname": "Test" }},
           "music": {{ "playUrl": "{audio}", "title": "test track" }},

@@ -8,7 +8,7 @@ performance and decisions. The user-facing API is in `GUIDE.md`.
 ```text
 ystt-waf   (no ystt deps)   challenge parsing + parallel SHA-256 solver
 ystt-net   (no ystt deps)   wreq client, emulation, retries, rate limits
-ystt-core  (net + waf)      URL/model/parser/planner/media/file cache/pipeline
+ystt-core  (net + waf)      URL/model/parser/media/caches/metrics/pipeline
 ystt-cli   (core)           minimal clap front-end
 ystt       (root)           public facade + offline/integration tests
 ```
@@ -170,9 +170,24 @@ same page/video pipeline use H2 while `v45` music uses H1.1. `Http2Only` and
 The feature-gated local integration server is HTTP/1.1 only; production
 `https_only(true)` is enabled outside that feature.
 
+### HTTP/2 tuning
+
+`wreq` browser emulation supplies a complete HTTP/2 profile: SETTINGS order,
+pseudo-header order, stream dependency, header table, windows and frame size.
+`Http2Tuning` is applied by cloning the emulation and modifying only
+connection-level window and keep-alive fields. TLS/JA3/JA4 and every HTTP/2
+fingerprint field remain untouched. Defaults are unchanged; the tuning is
+opt-in for deployments that need larger long-lived connections.
+
+The client shares one `wreq::Client`; page, video, photo and audio traffic reuse
+its pool and TLS session cache. `HttpResponse::protocol()` records the negotiated
+version for metrics.
+
 Server session cookies (`ttwid`, `tt_chain_token`, `tt_csrf_token`) are captured
-from the page response and sent to media. They are in-memory only. A media `403`
-invalidates the signed-URL cache, re-resolves the page once, and retries.
+from the page response and sent to media. In memory they live in a `CookieJar`.
+When the metadata cache is enabled, only those three names are persisted in a
+0600 JSON entry for the signed-URL lifetime. A media `403` invalidates the
+signed-URL cache, re-resolves the page once, and retries.
 
 ## 5. Download pipeline
 
@@ -182,19 +197,34 @@ parse URL
   └─ short link → redirect/HTML
 file-cache lookup (post_id, quality, audio)
   └─ hit → copy objects to output → done
-signed-URL cache lookup
+in-memory signed-URL lookup
   └─ hit → skip page
+persistent metadata lookup (post_id, quality)
+  └─ hit → load MediaInfo + filtered session cookie → skip page
 page GET → parse rehydration
   └─ no item → WAF challenge → solve → retry with cookie
 quality policy → MediaInfo
+persist metadata + filtered session cookie
 media plan
   ├─ photo gallery: concurrent single streams
   ├─ video: range-first adaptive
   └─ audio: single stream
+record per-host protocol/throughput metrics
 validate signatures
 atomic rename
 store file cache (if complete)
 ```
+
+### Batch and metrics
+
+`Ystt::download_many` runs independent URL jobs with `buffer_unordered`, indexed
+results and a bounded concurrency. It reuses the same HTTP pool, WAF solver and
+caches. Results are sorted back into input order; failures are captured as
+`ErrorInfo` slots instead of aborting the batch.
+
+Each completed page/media transfer appends a `TransferMetric`:
+`host`, `kind`, optional photo index, negotiated protocol, bytes, elapsed time and
+derived bits/s. Metrics are serialized with `DownloadResult` and batch items.
 
 ### Adaptive video transfer
 
@@ -253,7 +283,23 @@ validation.
 - cache hits materialise copies into the output directory and report
   `cache_hit = true`.
 
-The signed-URL cache is separate, in-memory and bounded to 256 entries.
+The signed-URL cache is split in two: an in-memory bounded cache for the current
+process and an on-disk metadata cache for new processes.
+
+### Metadata cache
+
+```text
+<user-cache>/ystt/metadata/<post_id>_<quality>.json
+```
+
+- schema version is explicit; old-schema entries are removed;
+- expiry is derived from the signed media URLs and capped by
+  `metadata_cache_ttl`;
+- `MediaInfo` plus only `ttwid`, `tt_chain_token`, `tt_csrf_token` are stored;
+- writes are atomic and 0600 on Unix;
+- expired, malformed and missing-media entries are removed on read;
+- capacity is bounded (256 entries, LRU-ish by file mtime);
+- `cache_dir` shares both `files/` and `metadata/` between output directories.
 
 ## 7. Reliability rules
 
@@ -261,7 +307,7 @@ The signed-URL cache is separate, in-memory and bounded to 256 entries.
 - no `unsafe` (workspace lint `unsafe_code = "forbid"`);
 - every temporary file is removed on error/cancellation;
 - body reads are bounded and idle-timed;
-- caches are bounded/TTL'd;
+- caches are bounded/TTL'd; metadata entries are schema-versioned and 0600;
 - `JoinSet` aborts sibling ranges on failure;
 - cancellation is checked before requests, during body reads and during sleeps;
 - public types are documented (`missing_docs = "warn"`).
@@ -364,7 +410,7 @@ Same 30.35 MiB video, five fresh processes each, no output cache:
 
 | Runtime | Runs (ms) | Average | Median |
 |---|---|---:|---:|
-| Rust 1.0.0 | 3056 / 2773 / 2956 / 2939 / 2891 | **2923 ms** | **2939 ms** |
+| Rust 1.1.0 | 3056 / 2773 / 2956 / 2939 / 2891 | **2923 ms** | **2939 ms** |
 | Bun 1.4.3 | 2867 / 2786 / 2932 / 2884 / 2607 | **2815 ms** | **2867 ms** |
 
 Cold single-file time is network-bound: page TTFB is ~0.55 s and the 30 MiB
@@ -417,7 +463,12 @@ TypeScript implementation is not part of this repository.
 ### Accepted
 
 - `wreq` for browser fingerprinting, despite BoringSSL build cost;
-- no account cookies; only server session cookies for media;
+- no account cookies; only filtered server session cookies for media;
+- persistent metadata cache with filtered server session cookies, 0600 and TTL;
+- batch API with bounded concurrency and ordered per-item results;
+- shared cache root for file and metadata caches;
+- per-transfer protocol/throughput metrics;
+- opt-in HTTP/2 connection/keep-alive tuning without changing the fingerprint;
 - manual URL/HTML parsing (no regex/panics);
 - full page + H.264 `playAddr` as the default video path;
 - official embed resolver as an opt-in/fallback for blocked video pages;

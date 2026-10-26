@@ -7,10 +7,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use wreq::header::{HeaderMap, RETRY_AFTER, USER_AGENT};
 use wreq::redirect::Policy;
-use wreq::{Client, Method};
+use wreq::{Client, IntoEmulation, Method};
 
 use crate::NetError;
-use crate::config::{HttpClientConfig, TransportPolicy};
+use crate::config::{Http2Tuning, HttpClientConfig, TransportPolicy};
 use crate::error::map_wreq_error;
 use crate::limiter::HostLimiter;
 use crate::response::HttpResponse;
@@ -129,8 +129,10 @@ impl std::fmt::Debug for HttpClient {
 impl HttpClient {
     /// Build a client using browser emulation and the configured pool limits.
     pub fn new(config: HttpClientConfig) -> Result<Self, NetError> {
+        let mut emulation = config.browser.emulation().into_emulation();
+        tune_http2(&mut emulation, &config.http2);
         let mut builder = Client::builder()
-            .emulation(config.browser.emulation())
+            .emulation(emulation)
             .timeout(config.timeout)
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.read_timeout)
@@ -326,6 +328,24 @@ fn host_of(url: &str) -> String {
         .unwrap_or_else(|| "invalid-host".into())
 }
 
+fn tune_http2(emulation: &mut wreq::Emulation, tuning: &Http2Tuning) {
+    let Some(http2) = emulation.http2_options.as_mut() else {
+        return;
+    };
+    if let Some(window) = tuning.connection_window {
+        http2.initial_conn_window_size = window;
+    }
+    if let Some(interval) = tuning.keep_alive_interval {
+        http2.keep_alive_interval = Some(interval);
+    }
+    if let Some(timeout) = tuning.keep_alive_timeout {
+        http2.keep_alive_timeout = timeout;
+    }
+    if let Some(while_idle) = tuning.keep_alive_while_idle {
+        http2.keep_alive_while_idle = while_idle;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +364,29 @@ mod tests {
         let options = RequestOptions::short_link();
         assert!(!options.allow_redirects);
         assert_eq!(options.class, RequestClass::ShortLink);
+    }
+
+    #[test]
+    fn http2_tuning_keeps_profile_settings() {
+        let mut emulation = crate::config::BrowserProfile::Chrome149
+            .emulation()
+            .into_emulation();
+        let before = emulation.http2_options.as_ref().unwrap().clone();
+        tune_http2(
+            &mut emulation,
+            &Http2Tuning {
+                connection_window: Some(64 * 1024 * 1024),
+                keep_alive_interval: Some(Duration::from_secs(30)),
+                keep_alive_timeout: Some(Duration::from_secs(5)),
+                keep_alive_while_idle: Some(true),
+            },
+        );
+        let after = emulation.http2_options.as_ref().unwrap();
+        assert_eq!(after.initial_window_size, before.initial_window_size);
+        assert_eq!(after.max_frame_size, before.max_frame_size);
+        assert_eq!(after.initial_conn_window_size, 64 * 1024 * 1024);
+        assert_eq!(after.keep_alive_interval, Some(Duration::from_secs(30)));
+        assert_eq!(after.keep_alive_timeout, Duration::from_secs(5));
+        assert!(after.keep_alive_while_idle);
     }
 }

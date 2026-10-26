@@ -13,6 +13,11 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - range-first video downloads, buffered writes, adaptive range concurrency;
 - one-request `200` fast path for videos up to 64 MiB;
 - content-addressed file cache (BLAKE3) with TTL and atomic manifests;
+- persistent metadata/signed-URL cache across processes;
+- batch API with bounded concurrency;
+- shared cache root across output directories;
+- per-CDN protocol/throughput metrics;
+- optional HTTP/2 connection/keep-alive tuning without changing TLS/JA3/JA4;
 - progress events through a callback, channel or custom sink;
 - partial gallery results with per-item failures;
 - per-media retry budget;
@@ -30,9 +35,10 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - no live streams;
 - HTTP/3 was evaluated and intentionally not used (see `INTERNALS.md`).
 
-The module does keep **server-set session cookies** from the same page response
-(`ttwid`, `tt_chain_token`, `tt_csrf_token`) in memory. The media CDN requires them.
-They are never persisted or logged.
+The module keeps **server-set session cookies** from the same page response
+(`ttwid`, `tt_chain_token`, `tt_csrf_token`). The media CDN requires them. When
+the metadata cache is enabled they are persisted in a filtered, owner-only cache
+entry for the signed-URL lifetime; account cookies are never accepted or stored.
 
 ### Transport policy
 
@@ -70,18 +76,21 @@ Metadata only:
 
 ```text
 ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
-           [--audio] [--no-cache]
+           [--audio] [--no-cache] [--cache-dir DIR]
 ```
 
 Defaults:
 
 - quality `balanced`;
-- file cache enabled;
+- file and metadata caches enabled;
 - content-addressed cache under `<output>/.ystt-cache`;
+- metadata cache under the user cache directory;
 - gallery concurrency 12;
 - adaptive ranges enabled for files above 64 MiB;
 - files at or below 64 MiB use one normal `200` GET;
 - partial gallery results enabled.
+- `--no-cache` disables both file and metadata caches for one call.
+- `--cache-dir` shares file and metadata caches across output directories.
 
 ## Library
 
@@ -116,9 +125,9 @@ async fn main() -> Result<(), ystt::YsttError> {
 
 ## JSON / web API
 
-`MediaInfo`, `DownloadResult`, `Timings`, `DownloadedFile`, `ErrorInfo` and all
-progress events implement `serde::Serialize`. A typical Axum handler is a thin
-wrapper:
+`MediaInfo`, `DownloadResult`, `Timings`, `DownloadedFile`, `TransferMetric`,
+`ErrorInfo` and all progress events implement `serde::Serialize`. A typical Axum
+handler is a thin wrapper:
 
 ```rust
 use axum::{Json, response::IntoResponse};
@@ -141,6 +150,71 @@ async fn download(
 `error.code()` returns a stable snake_case code (`unavailable`, `network`,
 `parse`, `cancelled`, ...). `Ystt` is cloneable and safe to share between
 requests; its URL cache and file cache are bounded.
+
+## Batch API
+
+```rust
+use ystt::{BatchOptions, Ystt};
+
+let batch = ystt
+    .download_many(urls, BatchOptions::new().concurrency(4).output_dir("downloads"))
+    .await;
+println!("ok={} failed={}", batch.successes(), batch.failures());
+for item in batch.items {
+    if let Some(result) = item.result {
+        println!("{}: {} ms", item.url, result.timings.total_ms);
+    } else if let Some(error) = item.error {
+        println!("{}: {} ({})", item.url, error.code, error.message);
+    }
+}
+```
+
+Results preserve input order. Each item has either `result` or a stable
+`ErrorInfo`; one failed URL does not cancel the remaining batch. `BatchOptions`
+accepts `output_dir`, `quality`, `include_audio`, `file_cache`,
+`metadata_cache`, `allow_partial` and a cancellation token. Concurrency defaults
+to 4 and is capped at 64.
+
+## Per-CDN metrics
+
+Every `DownloadResult` carries `metrics: Vec<TransferMetric>`:
+
+```text
+host, kind (page/video/photo/audio), index, protocol,
+bytes, elapsed_ms, throughput_bps
+```
+
+This is useful for observing H2/H1 behavior and CDN throughput. Example:
+
+```rust
+for metric in &result.metrics {
+    println!(
+        "{} {} {} {} B/s",
+        metric.host, metric.protocol, metric.kind as u8, metric.throughput_bps
+    );
+}
+```
+
+## HTTP/2 tuning
+
+Default transport settings are the untouched Chrome 149 profile. The optional
+`Http2Tuning` changes only connection-window and keep-alive behavior:
+
+```rust
+use std::time::Duration;
+use ystt::{Http2Tuning, Ystt};
+
+let ystt = Ystt::builder()
+    .http2_tuning(Http2Tuning {
+        connection_window: Some(32 * 1024 * 1024),
+        keep_alive_interval: Some(Duration::from_secs(30)),
+        ..Http2Tuning::default()
+    })
+    .build()?;
+```
+
+TLS/JA3/JA4, HTTP/2 SETTINGS order, pseudo-header order and stream dependency
+remain exactly as provided by the browser emulation.
 
 ## Progress events
 
@@ -180,9 +254,9 @@ Events: `Resolving`, `Resolved`, `CacheHit`, `WafChallenge`, `WafSolved`,
 You can also pass any `Fn(ProgressEvent) + Send + Sync` via
 `DownloadOptions::progress`.
 
-## File cache
+## File and metadata cache
 
-The cache is content-addressed:
+The file cache is content-addressed:
 
 ```text
 <output>/.ystt-cache/
@@ -190,18 +264,31 @@ The cache is content-addressed:
 └── objects/<blake3>.<ext>
 ```
 
+With a shared cache root (`.cache_dir(...)` or `--cache-dir`):
+
+```text
+<cache>/
+├── files/manifests/...
+├── files/objects/...
+└── metadata/<post_id>_<quality>.json
+```
+
 - first download copies bytes into the object store and writes a manifest;
 - subsequent calls materialise a copy into the output directory without HTTP;
-- entries expire after `file_cache_ttl` (default 24 h);
+- file entries expire after `file_cache_ttl` (default 24 h);
+- metadata entries expire after `metadata_cache_ttl`, capped by signed-URL expiry;
+- metadata hits skip the TikTok page and reload the filtered media session cookies;
 - failed/partial galleries are not cached;
 - `Ystt::prune_file_cache()` removes stale manifests and unreferenced objects;
-- `Ystt::clear_file_cache()` removes everything;
+- `Ystt::prune_metadata_cache()` removes expired/malformed metadata;
+- `Ystt::clear_file_cache()` and `clear_metadata_cache()` remove everything;
 - `Ystt::invalidate_file_cache(post_id, quality, audio)` removes one manifest;
-- `Ystt::invalidate_url_cache(post_id, quality)` drops one signed-URL entry;
-- `--no-cache` disables the file cache for one call.
+- `Ystt::invalidate_url_cache(post_id, quality)` drops one in-memory and disk entry;
+- `--no-cache` disables both caches for one call.
 
-The URL cache is separate: it stores signed CDN URLs in memory with expiry-aware
-TTL, so a repeat download in the same process skips the page request.
+The in-memory URL cache serves repeated calls in one process. The on-disk
+metadata cache serves new processes; both use expiry-aware TTLs and are
+invalidated together by `invalidate_url_cache`.
 
 ## Partial galleries
 

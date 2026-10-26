@@ -13,7 +13,7 @@ mod response;
 mod retry;
 
 pub use client::{HttpClient, RequestClass, RequestOptions};
-pub use config::{BrowserProfile, HttpClientConfig, TransportPolicy};
+pub use config::{BrowserProfile, Http2Tuning, HttpClientConfig, TransportPolicy};
 pub use error::NetError;
 pub use headers::{BrowserHeaders, RequestKind};
 pub use response::HttpResponse;

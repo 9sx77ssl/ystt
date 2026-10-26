@@ -40,9 +40,13 @@ struct Cli {
     #[arg(long)]
     audio: bool,
 
-    /// Do not use the content-addressed file cache.
+    /// Do not use the content-addressed file cache or metadata cache.
     #[arg(long)]
     no_cache: bool,
+
+    /// Shared cache root for file and metadata caches across outputs.
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -76,16 +80,21 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), YsttError> {
-    let ystt = Ystt::builder()
+    let mut builder = Ystt::builder()
         .output_dir(&cli.output)
         .quality(cli.quality.into())
         .include_audio(cli.audio)
         .file_cache(!cli.no_cache)
-        .build()?;
+        .metadata_cache(!cli.no_cache);
+    if let Some(cache_dir) = &cli.cache_dir {
+        builder = builder.cache_dir(cache_dir);
+    }
+    let ystt = builder.build()?;
 
     let options = DownloadOptions::new()
         .output_dir(&cli.output)
-        .file_cache(!cli.no_cache);
+        .file_cache(!cli.no_cache)
+        .metadata_cache(!cli.no_cache);
 
     if cli.info {
         let info = ystt.resolve_with(&cli.url, &options).await?;

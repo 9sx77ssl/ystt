@@ -41,6 +41,23 @@ impl std::str::FromStr for TransportPolicy {
     }
 }
 
+/// Optional HTTP/2 tuning that preserves the browser fingerprint.
+///
+/// These fields modify only connection-level window size and keep-alive
+/// behavior. HTTP/2 SETTINGS, pseudo-header order, stream dependency, TLS and
+/// the rest of the emulation profile remain exactly as supplied by `wreq-util`.
+#[derive(Debug, Clone, Default)]
+pub struct Http2Tuning {
+    /// Connection-level window size in bytes. `None` keeps the profile value.
+    pub connection_window: Option<u32>,
+    /// Optional HTTP/2 PING interval.
+    pub keep_alive_interval: Option<Duration>,
+    /// Timeout for a keep-alive PING acknowledgement.
+    pub keep_alive_timeout: Option<Duration>,
+    /// Send keep-alive PINGs while the connection is idle.
+    pub keep_alive_while_idle: Option<bool>,
+}
+
 /// Browser profile used for TLS and HTTP/2 emulation.
 ///
 /// The list intentionally exposes a few well-known profiles rather than all
@@ -133,6 +150,8 @@ pub struct HttpClientConfig {
     pub no_proxy: bool,
     /// HTTP protocol preference. `Auto` negotiates H2 and falls back to H1.
     pub transport: TransportPolicy,
+    /// Optional HTTP/2 tuning that keeps the TLS/JA3/JA4 profile intact.
+    pub http2: Http2Tuning,
 }
 
 impl Default for HttpClientConfig {
@@ -151,6 +170,7 @@ impl Default for HttpClientConfig {
             user_agent: None,
             no_proxy: true,
             transport: TransportPolicy::default(),
+            http2: Http2Tuning::default(),
         }
     }
 }

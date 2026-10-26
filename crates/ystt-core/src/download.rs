@@ -1,6 +1,7 @@
 //! End-to-end TikTok resolution and download pipeline.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, stream};
@@ -13,11 +14,13 @@ use ystt_waf::{WafChallenge, WafSolver};
 
 use crate::cache::UrlCache;
 use crate::config::{DownloadOptions, QualityPolicy, YsttConfig};
-use crate::error::{PartialFailure, Result, YsttError};
+use crate::error::{ErrorInfo, PartialFailure, Result, YsttError};
 use crate::file_cache::{CachedFile, FileCache, FileCacheEntry};
 use crate::media::{
     DownloadedFile, MediaContext, audio_ext, base_filename, download_media, photo_ext, video_ext,
 };
+use crate::metadata::{MetadataCache, default_metadata_root};
+use crate::metrics::{TransferKind, TransferMetric};
 use crate::model::{MediaInfo, MediaKind, TikTokItem};
 use crate::parse::{PageParse, parse_embed_page, parse_page};
 use crate::progress::{MediaTarget, ProgressEvent, ProgressReporter};
@@ -61,10 +64,141 @@ pub struct DownloadResult {
     pub audio: Option<DownloadedFile>,
     /// Gallery items that failed under partial mode.
     pub failures: Vec<PartialFailure>,
+    /// Per-CDN transfer metrics for this job.
+    pub metrics: Vec<TransferMetric>,
     /// Whether the result came from the content-addressed file cache.
     pub cache_hit: bool,
     /// Stage timings.
     pub timings: Timings,
+}
+
+/// Options for one batch download job.
+#[derive(Debug, Clone)]
+pub struct BatchOptions {
+    /// Maximum number of URLs downloaded concurrently (capped at 64).
+    pub concurrency: usize,
+    /// Output directory override.
+    pub output_dir: Option<PathBuf>,
+    /// Quality policy override.
+    pub quality: Option<QualityPolicy>,
+    /// Include music tracks.
+    pub include_audio: Option<bool>,
+    /// Enable or disable the file cache.
+    pub file_cache: Option<bool>,
+    /// Enable or disable the metadata cache.
+    pub metadata_cache: Option<bool>,
+    /// Allow partial gallery results.
+    pub allow_partial: Option<bool>,
+    /// Cancellation token shared by every item.
+    pub signal: Option<CancellationToken>,
+}
+
+impl Default for BatchOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BatchOptions {
+    /// Create options with a conservative default concurrency of four.
+    pub fn new() -> Self {
+        Self {
+            concurrency: 4,
+            output_dir: None,
+            quality: None,
+            include_audio: None,
+            file_cache: None,
+            metadata_cache: None,
+            allow_partial: None,
+            signal: None,
+        }
+    }
+
+    /// Set the maximum number of concurrent downloads.
+    pub fn concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Set the output directory.
+    pub fn output_dir(mut self, output_dir: impl Into<PathBuf>) -> Self {
+        self.output_dir = Some(output_dir.into());
+        self
+    }
+
+    /// Set the quality policy.
+    pub fn quality(mut self, quality: QualityPolicy) -> Self {
+        self.quality = Some(quality);
+        self
+    }
+
+    /// Include or exclude music.
+    pub fn include_audio(mut self, include: bool) -> Self {
+        self.include_audio = Some(include);
+        self
+    }
+
+    /// Enable or disable the file cache.
+    pub fn file_cache(mut self, enabled: bool) -> Self {
+        self.file_cache = Some(enabled);
+        self
+    }
+
+    /// Enable or disable the metadata cache.
+    pub fn metadata_cache(mut self, enabled: bool) -> Self {
+        self.metadata_cache = Some(enabled);
+        self
+    }
+
+    /// Allow partial gallery results.
+    pub fn allow_partial(mut self, allow: bool) -> Self {
+        self.allow_partial = Some(allow);
+        self
+    }
+
+    /// Attach a cancellation token.
+    pub fn signal(mut self, signal: CancellationToken) -> Self {
+        self.signal = Some(signal);
+        self
+    }
+}
+
+/// Result for one URL in a batch.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchItemResult {
+    /// Original URL, in input order.
+    pub url: String,
+    /// Successful download, if any.
+    pub result: Option<DownloadResult>,
+    /// Stable error payload, if the item failed.
+    pub error: Option<ErrorInfo>,
+}
+
+/// Results for a batch, preserving input order.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchResult {
+    /// Per-URL results in input order.
+    pub items: Vec<BatchItemResult>,
+    /// End-to-end wall time.
+    pub total_ms: u64,
+}
+
+impl BatchResult {
+    /// Number of successful items.
+    pub fn successes(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.result.is_some())
+            .count()
+    }
+
+    /// Number of failed items.
+    pub fn failures(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.error.is_some())
+            .count()
+    }
 }
 
 /// Main public downloader facade.
@@ -74,6 +208,7 @@ pub struct Ystt {
     http: HttpClient,
     waf: WafSolver,
     cache: std::sync::Arc<UrlCache>,
+    metadata: MetadataCache,
     waf_cookies: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
@@ -97,11 +232,18 @@ impl Ystt {
         let http = HttpClient::new(config.http.clone())?;
         let waf = WafSolver::new(config.waf.clone());
         let cache = std::sync::Arc::new(UrlCache::new(config.cache_ttl));
+        let metadata_root = config
+            .metadata_cache_dir
+            .clone()
+            .or_else(|| config.cache_dir.as_ref().map(|root| root.join("metadata")))
+            .unwrap_or_else(default_metadata_root);
+        let metadata = MetadataCache::new(metadata_root, config.metadata_cache_ttl);
         Ok(Self {
             config,
             http,
             waf,
             cache,
+            metadata,
             waf_cookies: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -138,11 +280,21 @@ impl Ystt {
         self.cache.clear().await;
     }
 
-    /// Invalidates one signed-URL cache entry.
+    /// Clear the persistent metadata cache.
+    pub async fn clear_metadata_cache(&self) -> Result<()> {
+        self.metadata.clear().await
+    }
+
+    /// Remove expired or malformed metadata-cache entries.
+    pub async fn prune_metadata_cache(&self) -> Result<usize> {
+        self.metadata.prune().await
+    }
+
+    /// Invalidates one signed-URL cache entry in memory and on disk.
     pub async fn invalidate_url_cache(&self, post_id: &str, quality: QualityPolicy) {
-        self.cache
-            .invalidate(&format!("{post_id}:{}", quality.as_str()))
-            .await;
+        let key = format!("{post_id}:{}", quality.as_str());
+        self.cache.invalidate(&key).await;
+        let _ = self.metadata.invalidate(&key).await;
     }
 
     /// Invalidate one file-cache manifest. Unreferenced objects are removed by
@@ -237,7 +389,7 @@ impl Ystt {
 
         let mut media_elapsed = Duration::ZERO;
         let mut re_resolved = false;
-        let (video, photos, audio, failures) = loop {
+        let (video, photos, audio, failures, media_metrics) = loop {
             let attempt_started = Instant::now();
             match self
                 .transfer(
@@ -261,6 +413,7 @@ impl Ystt {
                         debug!("media returned 403; re-resolving with the full page");
                         if resolved.from_cache {
                             self.cache.invalidate(&resolved.cache_key).await;
+                            let _ = self.metadata.invalidate(&resolved.cache_key).await;
                         }
                         resolved = self.resolve_internal_mode(url, &options, false).await?;
                         re_resolved = true;
@@ -285,6 +438,8 @@ impl Ystt {
         let mut timings = resolved.timings;
         timings.media_ms = millis(media_elapsed);
         timings.total_ms = millis(started.elapsed());
+        let mut metrics = resolved.metrics.clone();
+        metrics.extend(media_metrics);
 
         if file_cache_enabled && failures.is_empty() {
             let key = file_cache_key(&resolved.info.post_id, quality, include_audio);
@@ -316,6 +471,7 @@ impl Ystt {
             photos,
             audio,
             failures,
+            metrics,
             cache_hit: false,
             timings,
         };
@@ -326,6 +482,59 @@ impl Ystt {
             },
         );
         Ok(result)
+    }
+
+    /// Download a batch of URLs with bounded concurrency.
+    ///
+    /// Results preserve input order. A failed item does not cancel the rest;
+    /// the error is returned as a typed [`ErrorInfo`] in its slot.
+    pub async fn download_many<I, S>(&self, urls: I, options: BatchOptions) -> BatchResult
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let started = Instant::now();
+        let urls: Vec<String> = urls.into_iter().map(Into::into).collect();
+        let concurrency = if options.concurrency == 0 {
+            4
+        } else {
+            options.concurrency.min(64)
+        };
+        let mut items = stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
+            let downloader = self.clone();
+            let batch = options.clone();
+            async move {
+                let mut item_options = DownloadOptions::new();
+                item_options.output_dir = batch.output_dir.clone();
+                item_options.quality = batch.quality;
+                item_options.include_audio = batch.include_audio;
+                item_options.file_cache = batch.file_cache;
+                item_options.metadata_cache = batch.metadata_cache;
+                item_options.allow_partial = batch.allow_partial;
+                item_options.signal = batch.signal.clone();
+                let item = match downloader.download_with(&url, item_options).await {
+                    Ok(result) => BatchItemResult {
+                        url,
+                        result: Some(result),
+                        error: None,
+                    },
+                    Err(error) => BatchItemResult {
+                        url,
+                        result: None,
+                        error: Some(error.info()),
+                    },
+                };
+                (index, item)
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+        items.sort_by_key(|(index, _)| *index);
+        BatchResult {
+            items: items.into_iter().map(|(_, item)| item).collect(),
+            total_ms: millis(started.elapsed()),
+        }
     }
 
     async fn try_file_cache(
@@ -400,6 +609,7 @@ impl Ystt {
             photos,
             audio,
             failures: Vec::new(),
+            metrics: Vec::new(),
             cache_hit: true,
             timings: Timings {
                 resolve_ms: millis(elapsed),
@@ -451,6 +661,12 @@ impl Ystt {
         self.config
             .file_cache_dir
             .clone()
+            .or_else(|| {
+                self.config
+                    .cache_dir
+                    .as_ref()
+                    .map(|root| root.join("files"))
+            })
             .unwrap_or_else(|| output_dir.join(".ystt-cache"))
     }
 
@@ -465,6 +681,7 @@ impl Ystt {
         Vec<DownloadedFile>,
         Option<DownloadedFile>,
         Vec<PartialFailure>,
+        Vec<TransferMetric>,
     )> {
         let parallel_ranges = options
             .parallel_ranges
@@ -481,6 +698,7 @@ impl Ystt {
         let include_audio = options.include_audio.unwrap_or(self.config.include_audio);
         let reuse_existing = options.reuse_existing.unwrap_or(self.config.reuse_existing);
         let media_retries = options.media_retries.unwrap_or(self.config.media_retries);
+        let metrics = Arc::new(Mutex::new(Vec::new()));
 
         let context = MediaContext {
             client: &self.http,
@@ -501,6 +719,7 @@ impl Ystt {
                 .adaptive_ranges
                 .unwrap_or(self.config.adaptive_ranges),
             range_start_connections: self.config.range_start_connections,
+            metrics: metrics.clone(),
         };
 
         let base = base_filename(&info.author.id, &info.post_id);
@@ -608,7 +827,12 @@ impl Ystt {
 
         let (video, (photos, failures), audio) =
             tokio::try_join!(video_future, photos_future, audio_future)?;
-        Ok((video, photos, audio, failures))
+        let mut metrics = metrics
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        metrics.sort_by_key(|metric| (metric.kind, metric.index));
+        Ok((video, photos, audio, failures, metrics))
     }
 
     async fn resolve_internal(&self, url: &str, options: &DownloadOptions) -> Result<Resolved> {
@@ -632,6 +856,7 @@ impl Ystt {
 
         let quality = options.quality.unwrap_or(self.config.quality);
         let cache_key = format!("{post_id}:{}", quality.as_str());
+        let metadata_enabled = options.metadata_cache.unwrap_or(self.config.metadata_cache);
 
         if let Some(mut cached) = self.cache.get(&cache_key).await {
             cached.source_url = url.to_owned();
@@ -647,6 +872,27 @@ impl Ystt {
                 from_embed: false,
                 cache_key,
                 cookie: None,
+                metrics: Vec::new(),
+            });
+        }
+
+        if metadata_enabled && let Some(entry) = self.metadata.get(&cache_key).await {
+            let mut info = entry.info;
+            info.source_url = url.to_owned();
+            self.cache.put(cache_key.clone(), info.clone()).await;
+            let elapsed = started.elapsed();
+            return Ok(Resolved {
+                info,
+                timings: Timings {
+                    resolve_ms: millis(elapsed),
+                    total_ms: millis(elapsed),
+                    ..Timings::default()
+                },
+                from_cache: true,
+                from_embed: false,
+                cache_key,
+                cookie: entry.cookie,
+                metrics: Vec::new(),
             });
         }
 
@@ -743,6 +989,14 @@ impl Ystt {
 
         if info.has_media() {
             self.cache.put(cache_key.clone(), info.clone()).await;
+            if metadata_enabled
+                && let Err(error) = self
+                    .metadata
+                    .put(&cache_key, &info, outcome.cookie.as_deref())
+                    .await
+            {
+                tracing::warn!(?error, "failed to store metadata cache");
+            }
         }
 
         let elapsed = started.elapsed();
@@ -760,6 +1014,7 @@ impl Ystt {
             from_embed,
             cache_key,
             cookie,
+            metrics: outcome.metrics,
         })
     }
 
@@ -858,6 +1113,7 @@ impl Ystt {
             cookies.absorb(&set_cookie);
         }
 
+        let protocol = response.protocol();
         let body_started = Instant::now();
         let html = match response
             .text(
@@ -874,6 +1130,15 @@ impl Ystt {
             }
         };
         let body_elapsed = body_started.elapsed();
+        let transfer_elapsed = started.elapsed();
+        let metric = TransferMetric::new(
+            &url,
+            TransferKind::Page,
+            None,
+            protocol,
+            html.len() as u64,
+            transfer_elapsed,
+        );
         let parse_started = Instant::now();
         let item = parse_embed_page(&html, post_id);
         let parse_elapsed = parse_started.elapsed();
@@ -893,6 +1158,7 @@ impl Ystt {
             parse: parse_elapsed,
             cookie: cookies.header(),
             from_embed: true,
+            metrics: vec![metric],
         }))
     }
 
@@ -944,6 +1210,7 @@ impl Ystt {
             }
 
             let version = response.version();
+            let protocol = response.protocol();
             let body_started = Instant::now();
             let html = response
                 .text(
@@ -952,6 +1219,15 @@ impl Ystt {
                     signal,
                 )
                 .await?;
+            let transfer_elapsed = request_started.elapsed();
+            let metric = TransferMetric::new(
+                page_url,
+                TransferKind::Page,
+                None,
+                protocol,
+                html.len() as u64,
+                transfer_elapsed,
+            );
             debug!(
                 attempt,
                 ?version,
@@ -979,6 +1255,7 @@ impl Ystt {
                         parse: parse_total,
                         cookie: cookies.header(),
                         from_embed: false,
+                        metrics: vec![metric],
                     });
                 }
                 PageParse::NoItem => {
@@ -1132,6 +1409,12 @@ impl YsttBuilder {
         self
     }
 
+    /// Optional HTTP/2 tuning that preserves TLS/JA3/JA4 and H2 settings.
+    pub fn http2_tuning(mut self, tuning: ystt_net::Http2Tuning) -> Self {
+        self.config.http.http2 = tuning;
+        self
+    }
+
     /// Total request timeout.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.config.http.timeout = timeout;
@@ -1222,9 +1505,33 @@ impl YsttBuilder {
         self
     }
 
+    /// Shared cache root for file and metadata caches across output directories.
+    pub fn cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.cache_dir = Some(path.into());
+        self
+    }
+
     /// File-cache TTL.
     pub fn file_cache_ttl(mut self, ttl: Duration) -> Self {
         self.config.file_cache_ttl = ttl;
+        self
+    }
+
+    /// Enable or disable the persistent metadata cache.
+    pub fn metadata_cache(mut self, enabled: bool) -> Self {
+        self.config.metadata_cache = enabled;
+        self
+    }
+
+    /// Override the metadata-cache root.
+    pub fn metadata_cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.metadata_cache_dir = Some(path.into());
+        self
+    }
+
+    /// Metadata-cache TTL ceiling.
+    pub fn metadata_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.config.metadata_cache_ttl = ttl;
         self
     }
 
@@ -1289,6 +1596,7 @@ struct Resolved {
     from_embed: bool,
     cache_key: String,
     cookie: Option<String>,
+    metrics: Vec<TransferMetric>,
 }
 
 struct FetchOutcome {
@@ -1298,6 +1606,7 @@ struct FetchOutcome {
     parse: Duration,
     cookie: Option<String>,
     from_embed: bool,
+    metrics: Vec<TransferMetric>,
 }
 
 #[derive(Default)]
