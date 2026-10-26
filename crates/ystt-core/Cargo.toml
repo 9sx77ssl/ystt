@@ -1,0 +1,34 @@
+[package]
+name = "ystt-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "TikTok URL model, page parser and media download pipeline"
+
+[dependencies]
+blake3.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+http.workspace = true
+memchr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "fs", "io-util", "sync", "time", "macros"] }
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+ystt-net.workspace = true
+ystt-waf.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+integration-tests = []
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util"] }
+serde_json.workspace = true

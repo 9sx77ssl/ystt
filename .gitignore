@@ -1,0 +1,12 @@
+/target
+/downloads
+.ystt-cache/
+*.part
+*.tmp
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea
+.vscode
+*.log

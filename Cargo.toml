@@ -1,0 +1,90 @@
+[workspace]
+members = [
+  "crates/ystt-waf",
+  "crates/ystt-net",
+  "crates/ystt-core",
+  "crates/ystt-cli",
+]
+resolver = "3"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+authors = ["ystt contributors"]
+repository = "https://github.com/9sx77ssl/ystt"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[workspace.dependencies]
+ystt-waf = { path = "crates/ystt-waf", version = "1.0.0" }
+ystt-net = { path = "crates/ystt-net", version = "1.0.0" }
+ystt-core = { path = "crates/ystt-core", version = "1.0.0" }
+
+base64 = "0.23.1"
+blake3 = "1.8.7"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+http = "1.5.0"
+itoa = "1.0.18"
+memchr = "2.8.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+url = "2.5.8"
+wreq = { version = "6.0.0-rc.31", features = ["stream", "gzip", "brotli", "deflate", "zstd", "tracing"] }
+wreq-util = "3.0.0-rc.14"
+
+[package]
+name = "ystt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Fast, resilient TikTok downloader for public videos, galleries and music"
+readme = "README.md"
+repository.workspace = true
+keywords = ["tiktok", "downloader", "video", "gallery", "cli"]
+categories = ["command-line-utilities", "web-programming"]
+
+[features]
+integration-tests = ["ystt-core/integration-tests", "ystt-net/integration-tests"]
+
+[dependencies]
+ystt-core.workspace = true
+ystt-net.workspace = true
+ystt-waf.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "fs"] }
+tracing-subscriber.workspace = true
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+opt-level = 3
