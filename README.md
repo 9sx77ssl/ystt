@@ -25,11 +25,11 @@ through a content-addressed cache.
 - Persistent metadata/signed-URL cache across processes.
 - Batch API with bounded concurrency.
 - Optional shared cache root across output directories.
-- Per-CDN protocol and throughput metrics.
 - Optional HTTP/2 connection/keep-alive tuning without changing the TLS/JA3/JA4
   or HTTP/2 settings fingerprint.
 - Expiry-aware signed-URL cache.
-- Typed progress events and stage timings.
+- Unified typed progress for solo downloads and batches.
+- Stage timings.
 - Partial gallery results with per-item retry control.
 - JSON-ready results and stable `ErrorInfo` payloads for HTTP APIs.
 - No account cookies; only a filtered set of server session cookies is kept for
@@ -97,8 +97,38 @@ async fn main() -> Result<(), ystt::YsttError> {
 ```
 
 `Ystt` is cloneable and safe to share between async tasks. `MediaInfo`,
-`DownloadResult`, `Timings`, `DownloadedFile`, `TransferMetric` and `ErrorInfo`
+`DownloadResult`, `Timings`, `DownloadedFile` and `ErrorInfo`
 implement `serde::Serialize`.
+
+### Progress
+
+One event stream covers solo downloads and batch items:
+
+```rust
+use ystt::{DownloadOptions, ProgressStage, progress_channel};
+
+let (reporter, mut events) = progress_channel();
+let handle = tokio::spawn(async move {
+    while let Some(event) = events.recv().await {
+        match event.stage {
+            ProgressStage::MediaProgress { downloaded_bytes, total_bytes, .. } => {
+                println!("{} {:?}/{:?}", event.url.unwrap_or_default(), downloaded_bytes, total_bytes);
+            }
+            ProgressStage::BatchCompleted { successes, failures, .. } => {
+                println!("batch done: {successes} ok, {failures} failed");
+            }
+            _ => {}
+        }
+    }
+});
+let result = ystt.download_with(url, DownloadOptions::new().progress(reporter)).await?;
+```
+
+Every event carries `job_id`, optional `url`, and for batch items
+`batch_index` / `batch_total`. Batch lifecycle is reported through `BatchStarted`, per-item
+`BatchProgress` (completed/failed counts) and `BatchCompleted`; item failures are
+`Failed` with stable `ErrorInfo`. `BatchOptions::progress(reporter)` attaches the same reporter to
+`download_many`.
 
 ### Batch
 
@@ -149,54 +179,6 @@ never accepted.
 keeping the browser's TLS/JA3/JA4 and HTTP/2 SETTINGS fingerprint intact. It is
 opt-in; the default is the untouched Chrome 149 profile.
 
-## Metrics
-
-Each `DownloadResult` contains `metrics: Vec<TransferMetric>`:
-
-```text
-host, kind (page/video/photo/audio), index, protocol,
-bytes, elapsed_ms, throughput_bps
-```
-
-Use it to observe which CDN host served a transfer, whether it used HTTP/2 or
-HTTP/1.1, and how fast it was. The metrics are also serialized by the JSON CLI
-and batch results.
-
-## Caching
-
-Default layout:
-
-```text
-<output>/.ystt-cache/
-├── manifests/<post_id>_<quality>_<audio>.json
-└── objects/<blake3>.<ext>
-```
-
-With `--cache-dir /var/cache/ystt` (or `YsttBuilder::cache_dir`):
-
-```text
-/var/cache/ystt/
-├── files/manifests/...     # shared across output directories
-├── files/objects/...
-└── metadata/<post_id>_<quality>.json
-```
-
-- First download stores immutable objects and writes an atomic manifest.
-- A file-cache hit copies the object into the output directory without HTTP.
-- The metadata cache stores resolved signed URLs across processes; a hit skips
-  the TikTok page and validates the URL expiry before use.
-- Metadata entries keep only `ttwid`, `tt_chain_token` and `tt_csrf_token`;
-  files are written atomically with owner-only permissions on Unix.
-- Entries expire after `file_cache_ttl` / `metadata_cache_ttl`; signed-URL
-  expiry may shorten metadata TTL.
-- The default metadata root is `$XDG_CACHE_HOME/ystt/metadata` (or the platform
-  user cache); set `metadata_cache_dir` or `cache_dir` to override it.
-- Expired, malformed, old-schema or missing-object entries are removed on read.
-- `Ystt::prune_file_cache()` and `prune_metadata_cache()` remove stale data.
-- `Ystt::clear_file_cache()` and `clear_metadata_cache()` remove everything.
-- `Ystt::invalidate_file_cache(...)` and `invalidate_url_cache(...)` drop one entry.
-- `--no-cache` disables both caches for one call.
-
 ## Performance
 
 Measured on x86_64 Linux, release build, no proxy and no account cookies:
@@ -224,7 +206,7 @@ cargo test --features integration-tests --test integration_pipeline
 
 The default suite is offline. The integration suite starts a local HTTP server
 and covers video ranges, session cookies, music, progress events, shared file
-cache, persistent metadata cache, batch ordering/errors, transfer metrics,
+cache, persistent metadata cache, batch ordering/errors, unified progress,
 partial galleries and the embed fallback.
 
 ## Layout

@@ -16,7 +16,7 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - persistent metadata/signed-URL cache across processes;
 - batch API with bounded concurrency;
 - shared cache root across output directories;
-- per-CDN protocol/throughput metrics;
+- unified progress for downloads, resolve calls and batches;
 - optional HTTP/2 connection/keep-alive tuning without changing TLS/JA3/JA4;
 - progress events through a callback, channel or custom sink;
 - partial gallery results with per-item failures;
@@ -125,8 +125,7 @@ async fn main() -> Result<(), ystt::YsttError> {
 
 ## JSON / web API
 
-`MediaInfo`, `DownloadResult`, `Timings`, `DownloadedFile`, `TransferMetric`,
-`ErrorInfo` and all progress events implement `serde::Serialize`. A typical Axum
+`MediaInfo`, `DownloadResult`, `Timings`, `DownloadedFile`, `ErrorInfo` and all progress events implement `serde::Serialize`. A typical Axum
 handler is a thin wrapper:
 
 ```rust
@@ -175,26 +174,6 @@ accepts `output_dir`, `quality`, `include_audio`, `file_cache`,
 `metadata_cache`, `allow_partial` and a cancellation token. Concurrency defaults
 to 4 and is capped at 64.
 
-## Per-CDN metrics
-
-Every `DownloadResult` carries `metrics: Vec<TransferMetric>`:
-
-```text
-host, kind (page/video/photo/audio), index, protocol,
-bytes, elapsed_ms, throughput_bps
-```
-
-This is useful for observing H2/H1 behavior and CDN throughput. Example:
-
-```rust
-for metric in &result.metrics {
-    println!(
-        "{} {} {} {} B/s",
-        metric.host, metric.protocol, metric.kind as u8, metric.throughput_bps
-    );
-}
-```
-
 ## HTTP/2 tuning
 
 Default transport settings are the untouched Chrome 149 profile. The optional
@@ -216,10 +195,54 @@ let ystt = Ystt::builder()
 TLS/JA3/JA4, HTTP/2 SETTINGS order, pseudo-header order and stream dependency
 remain exactly as provided by the browser emulation.
 
-## Progress events
+### For a web API
+
+Recommended shape for a long-running backend:
 
 ```rust
-use ystt::{DownloadOptions, ProgressEvent, Ystt, progress_channel};
+use std::sync::Arc;
+use std::time::Duration;
+use ystt::{Http2Tuning, Ystt};
+
+let ystt = Arc::new(
+    Ystt::builder()
+        .cache_dir("/var/cache/ystt")
+        .http2_tuning(Http2Tuning {
+            keep_alive_interval: Some(Duration::from_secs(30)),
+            keep_alive_timeout: Some(Duration::from_secs(5)),
+            keep_alive_while_idle: Some(true),
+            ..Http2Tuning::default()
+        })
+        .build()?,
+);
+```
+
+- Build one `Ystt` per process and clone the `Arc` into handlers.
+- Keep `TransportPolicy::Auto`; it uses H2 for pages/video and H1 for `v45`
+  music without failed handshakes.
+- Keep `connection_window: None` unless a real deployment benchmark proves a
+  larger window helps. The Chrome profile already uses a 15 MiB connection
+  window.
+- Use `keep_alive_*` for API processes that keep connections idle between jobs.
+  It is irrelevant for a one-shot CLI.
+- Share `cache_dir` between workers. File and metadata caches are atomic and
+  safe for concurrent readers/writers.
+- Do not create a new `Ystt` per request: that throws away the connection pool,
+  TLS session cache, WAF cookie cache and signed-URL cache.
+- `Http2Only` is an advanced override; do not use it when H1-only CDN hosts must
+  remain supported.
+
+The module does not measure CDN responses or collect per-host throughput data.
+Use `RUST_LOG=debug` for protocol/request diagnostics and the stage timings in
+`DownloadResult` for application-level latency.
+
+## Progress events
+
+One context-aware event stream is used by `download_with`, `resolve_with` and
+`download_many`.
+
+```rust
+use ystt::{DownloadOptions, ProgressStage, progress_channel};
 
 let (reporter, mut events) = progress_channel();
 let options = DownloadOptions::new().progress(reporter);
@@ -231,11 +254,12 @@ loop {
     tokio::select! {
         event = events.recv() => {
             if let Some(event) = event {
-                match event {
-                    ProgressEvent::MediaProgress { downloaded_bytes, total_bytes, .. } => {
+                match event.stage {
+                    ProgressStage::MediaProgress { downloaded_bytes, total_bytes, .. } => {
                         println!("{downloaded_bytes}/{total_bytes:?}");
                     }
-                    ProgressEvent::Completed { total_ms } => println!("done in {total_ms} ms"),
+                    ProgressStage::Completed { total_ms } => println!("done in {total_ms} ms"),
+                    ProgressStage::Failed { error } => eprintln!("{}: {}", error.code, error.message),
                     _ => {}
                 }
             }
@@ -248,11 +272,38 @@ loop {
 }
 ```
 
-Events: `Resolving`, `Resolved`, `CacheHit`, `WafChallenge`, `WafSolved`,
-`MediaStarted`, `MediaProgress`, `MediaCompleted`, `Completed`.
+Every `ProgressEvent` has:
 
-You can also pass any `Fn(ProgressEvent) + Send + Sync` via
-`DownloadOptions::progress`.
+```text
+job_id       unique ID for a solo download, resolve, or batch
+url          item URL; None for batch-level events
+batch_index  Some(index) for batch items, None for solo
+batch_total  Some(total) for batch items
+stage        typed ProgressStage
+```
+
+Stages: `BatchStarted`, `BatchProgress`, `BatchCompleted`, `Resolving`,
+`Resolved`, `CacheHit`, `WafChallenge`, `WafSolved`, `MediaStarted`,
+`MediaProgress`, `MediaCompleted`, `Completed`, `Failed`.
+
+`BatchProgress` contains only aggregate item counts (`completed_items`,
+`failed_items`, `total_items`), not CDN or network measurements.
+
+For batches, attach the same reporter:
+
+```rust
+let batch = ystt
+    .download_many(urls, BatchOptions::new().progress(reporter))
+    .await;
+```
+
+`BatchStarted` and `BatchCompleted` are batch-level events; item events carry
+`batch_index`/`batch_total`. A failed item emits `Failed` and does not cancel the
+rest. `BatchResult` also provides final successes/failures and ordered per-item
+results.
+
+Any `Fn(ProgressEvent) + Send + Sync` can be used as a `ProgressSink` through
+`DownloadOptions::progress` or `BatchOptions::progress`.
 
 ## File and metadata cache
 

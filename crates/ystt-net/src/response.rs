@@ -42,18 +42,6 @@ impl HttpResponse {
         self.inner.version()
     }
 
-    /// Stable protocol label for metrics.
-    pub fn protocol(&self) -> &'static str {
-        match self.inner.version() {
-            wreq::Version::HTTP_09 => "HTTP/0.9",
-            wreq::Version::HTTP_10 => "HTTP/1.0",
-            wreq::Version::HTTP_11 => "HTTP/1.1",
-            wreq::Version::HTTP_2 => "HTTP/2.0",
-            wreq::Version::HTTP_3 => "HTTP/3.0",
-            _ => "HTTP/unknown",
-        }
-    }
-
     /// Whether the status is 2xx.
     pub fn is_success(&self) -> bool {
         self.inner.status().is_success()

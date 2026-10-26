@@ -10,8 +10,7 @@ mod support;
 use std::sync::atomic::Ordering;
 
 use ystt::{
-    BatchOptions, DownloadOptions, MediaKind, ProgressEvent, TransferKind, Ystt, YsttError,
-    progress_channel,
+    BatchOptions, DownloadOptions, MediaKind, ProgressStage, Ystt, YsttError, progress_channel,
 };
 
 fn video_url() -> &'static str {
@@ -75,29 +74,19 @@ async fn video_ranges_cookies_progress_and_file_cache() {
         server.counters.media.load(Ordering::Relaxed),
         server.counters.ranges.load(Ordering::Relaxed)
     );
-    assert!(result.metrics.iter().any(|metric| {
-        metric.kind == TransferKind::Page
-            && metric.protocol == "HTTP/1.1"
-            && metric.host == "127.0.0.1"
-    }));
-    assert!(result.metrics.iter().any(|metric| {
-        metric.kind == TransferKind::Video
-            && metric.bytes == support::VIDEO_SIZE as u64
-            && metric.throughput_bps > 0
-    }));
 
     let mut started = false;
     let mut progressed = false;
     let mut completed = false;
     while let Ok(event) = events.try_recv() {
-        match event {
-            ProgressEvent::MediaStarted { .. } => started = true,
-            ProgressEvent::MediaProgress {
+        match event.stage {
+            ProgressStage::MediaStarted { .. } => started = true,
+            ProgressStage::MediaProgress {
                 downloaded_bytes, ..
             } if downloaded_bytes > 0 => {
                 progressed = true;
             }
-            ProgressEvent::MediaCompleted { .. } => completed = true,
+            ProgressStage::MediaCompleted { .. } => completed = true,
             _ => {}
         }
     }
@@ -151,12 +140,6 @@ async fn audio_downloads_through_the_same_pipeline() {
     let bytes = tokio::fs::read(&audio.path).await.unwrap();
     assert!(bytes.starts_with(b"ID3"));
     assert!(result.failures.is_empty());
-    assert!(
-        result
-            .metrics
-            .iter()
-            .any(|metric| metric.kind == TransferKind::Audio)
-    );
 }
 
 #[tokio::test]
@@ -256,12 +239,50 @@ async fn batch_preserves_order_and_reports_errors() {
         "https://www.tiktok.com/@test/video/999",
         video_url_two(),
     ];
+    let (reporter, mut events) = progress_channel();
     let batch = ystt
         .download_many(
             urls,
-            BatchOptions::new().output_dir(dir.path()).concurrency(2),
+            BatchOptions::new()
+                .output_dir(dir.path())
+                .concurrency(2)
+                .progress(reporter),
         )
         .await;
+
+    let mut started = false;
+    let mut progressed = false;
+    let mut completed = false;
+    let mut item_event = false;
+    while let Ok(event) = events.try_recv() {
+        match event.stage {
+            ProgressStage::BatchStarted { total_items } => {
+                assert_eq!(total_items, 3);
+                started = true;
+            }
+            ProgressStage::BatchProgress {
+                completed_items,
+                failed_items,
+                total_items,
+            } => {
+                assert_eq!(total_items, 3);
+                assert!(completed_items + failed_items > 0);
+                progressed = true;
+            }
+            ProgressStage::BatchCompleted {
+                successes,
+                failures,
+                ..
+            } => {
+                assert_eq!(successes, 2);
+                assert_eq!(failures, 1);
+                completed = true;
+            }
+            _ if event.batch_index.is_some() => item_event = true,
+            _ => {}
+        }
+    }
+    assert!(started && progressed && completed && item_event);
 
     assert_eq!(batch.items.len(), 3);
     assert_eq!(batch.successes(), 2);

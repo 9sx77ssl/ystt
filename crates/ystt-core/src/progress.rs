@@ -1,7 +1,8 @@
-//! Typed progress events for long downloads.
+//! Unified progress events for single and batch downloads.
 //!
-//! Events are delivered through a [`ProgressSink`]. Use [`progress_channel`]
-//! for a `tokio` channel, or implement the trait for a callback.
+//! Every event carries a `job_id` and, for batch items, the item index and batch
+//! size. The same event stream is used by `download`, `download_with`,
+//! `resolve_with` and `download_many`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,17 +10,44 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::error::ErrorInfo;
 use crate::model::MediaKind;
 
-/// Stage of the download pipeline.
+static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a process-unique job ID.
+pub(crate) fn next_job_id() -> u64 {
+    NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Top-level event delivered to a progress sink.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressEvent {
+    /// Process-unique job ID. All events of one single download or one batch
+    /// share this ID.
+    pub job_id: u64,
+    /// Source URL for an item event; `None` for batch-level events.
+    pub url: Option<String>,
+    /// Zero-based item index inside a batch; `None` for single downloads and
+    /// batch-level events.
+    pub batch_index: Option<usize>,
+    /// Number of items in the batch; `None` for single downloads.
+    pub batch_total: Option<usize>,
+    /// Activity that occurred.
+    pub stage: ProgressStage,
+}
+
+/// Activity inside a job.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
-pub enum ProgressEvent {
-    /// URL/ID resolution started.
-    Resolving {
-        /// Input URL.
-        url: String,
+pub enum ProgressStage {
+    /// A batch started.
+    BatchStarted {
+        /// Number of URLs in the batch.
+        total_items: usize,
     },
+    /// URL/ID resolution started.
+    Resolving,
     /// Metadata was resolved.
     Resolved {
         /// Post ID.
@@ -71,10 +99,33 @@ pub enum ProgressEvent {
         /// Final size.
         bytes: u64,
     },
-    /// The whole job completed.
+    /// A single download or one batch item completed.
     Completed {
-        /// End-to-end milliseconds.
+        /// End-to-end milliseconds for the item.
         total_ms: u64,
+    },
+    /// An item or single download failed.
+    Failed {
+        /// Stable error payload.
+        error: ErrorInfo,
+    },
+    /// A batch item finished; aggregate item progress.
+    BatchProgress {
+        /// Items that succeeded so far.
+        completed_items: usize,
+        /// Items that failed so far.
+        failed_items: usize,
+        /// Total items.
+        total_items: usize,
+    },
+    /// A batch completed.
+    BatchCompleted {
+        /// End-to-end wall time.
+        total_ms: u64,
+        /// Successful items.
+        successes: usize,
+        /// Failed items.
+        failures: usize,
     },
 }
 
@@ -96,7 +147,7 @@ impl MediaTarget {
         }
     }
 
-    /// Photo target.
+    /// Gallery item.
     pub fn photo(index: usize) -> Self {
         Self {
             kind: MediaKind::Photo,
@@ -124,7 +175,7 @@ where
     F: Fn(ProgressEvent) + Send + Sync,
 {
     fn report(&self, event: ProgressEvent) {
-        self(event);
+        self(event)
     }
 }
 
@@ -147,9 +198,76 @@ impl ProgressSink for ChannelSink {
     }
 }
 
+/// Internal context-aware reporter.
+#[derive(Clone)]
+pub(crate) struct ProgressEmitter {
+    reporter: Option<ProgressReporter>,
+    job_id: u64,
+    url: Option<String>,
+    batch_index: Option<usize>,
+    batch_total: Option<usize>,
+}
+
+impl ProgressEmitter {
+    /// Context for a single download or resolve.
+    pub(crate) fn single(
+        reporter: Option<ProgressReporter>,
+        job_id: u64,
+        url: impl Into<String>,
+    ) -> Self {
+        Self {
+            reporter,
+            job_id,
+            url: Some(url.into()),
+            batch_index: None,
+            batch_total: None,
+        }
+    }
+
+    /// Context for batch-level events.
+    pub(crate) fn batch(
+        reporter: Option<ProgressReporter>,
+        job_id: u64,
+        total_items: usize,
+    ) -> Self {
+        Self {
+            reporter,
+            job_id,
+            url: None,
+            batch_index: None,
+            batch_total: Some(total_items),
+        }
+    }
+
+    /// Clone this context for one batch item.
+    pub(crate) fn child(&self, url: impl Into<String>, index: usize, total: usize) -> Self {
+        Self {
+            reporter: self.reporter.clone(),
+            job_id: self.job_id,
+            url: Some(url.into()),
+            batch_index: Some(index),
+            batch_total: Some(total),
+        }
+    }
+
+    /// Emit one stage.
+    pub(crate) fn emit(&self, stage: ProgressStage) {
+        let Some(reporter) = &self.reporter else {
+            return;
+        };
+        reporter.report(ProgressEvent {
+            job_id: self.job_id,
+            url: self.url.clone(),
+            batch_index: self.batch_index,
+            batch_total: self.batch_total,
+            stage,
+        });
+    }
+}
+
 /// Internal per-file progress tracker.
 pub(crate) struct ProgressTracker {
-    reporter: ProgressReporter,
+    emitter: ProgressEmitter,
     target: MediaTarget,
     total: AtomicU64,
     downloaded: AtomicU64,
@@ -158,20 +276,20 @@ pub(crate) struct ProgressTracker {
 
 impl ProgressTracker {
     pub(crate) fn new(
-        reporter: ProgressReporter,
+        emitter: ProgressEmitter,
         target: MediaTarget,
         total: Option<u64>,
     ) -> Arc<Self> {
         let tracker = Arc::new(Self {
-            reporter,
+            emitter,
             target,
             total: AtomicU64::new(total.unwrap_or(0)),
             downloaded: AtomicU64::new(0),
             last_reported: AtomicU64::new(0),
         });
-        tracker.reporter.report(ProgressEvent::MediaStarted {
-            kind: tracker.target.kind,
-            index: tracker.target.index,
+        tracker.emitter.emit(ProgressStage::MediaStarted {
+            kind: target.kind,
+            index: target.index,
             total_bytes: total,
         });
         tracker
@@ -193,7 +311,7 @@ impl ProgressTracker {
     pub(crate) fn complete(&self) {
         let downloaded = self.downloaded.load(Ordering::Relaxed);
         self.report(downloaded);
-        self.reporter.report(ProgressEvent::MediaCompleted {
+        self.emitter.emit(ProgressStage::MediaCompleted {
             kind: self.target.kind,
             index: self.target.index,
             bytes: downloaded,
@@ -202,7 +320,7 @@ impl ProgressTracker {
 
     fn report(&self, downloaded: u64) {
         let total = self.total.load(Ordering::Relaxed);
-        self.reporter.report(ProgressEvent::MediaProgress {
+        self.emitter.emit(ProgressStage::MediaProgress {
             kind: self.target.kind,
             index: self.target.index,
             downloaded_bytes: downloaded,
@@ -217,13 +335,17 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn channel_reports_events() {
+    fn channel_reports_context_and_stage() {
         let (reporter, mut receiver) = progress_channel();
-        reporter.report(ProgressEvent::Resolving {
-            url: "https://www.tiktok.com/@u/video/1".into(),
-        });
+        let emitter = ProgressEmitter::single(Some(reporter), 7, "https://tiktok/x");
+        emitter.emit(ProgressStage::Resolving);
         let event = receiver.try_recv().unwrap();
-        assert!(matches!(event, ProgressEvent::Resolving { .. }));
+        assert_eq!(event.job_id, 7);
+        assert_eq!(event.url.as_deref(), Some("https://tiktok/x"));
+        assert!(matches!(event.stage, ProgressStage::Resolving));
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["stage"]["event"], "resolving");
+        assert_eq!(json["job_id"], 7);
     }
 
     #[test]
@@ -233,20 +355,40 @@ mod tests {
             let events = events.clone();
             Arc::new(move |event| events.lock().unwrap().push(event))
         };
-        let tracker = ProgressTracker::new(sink, MediaTarget::video(), Some(300 * 1024));
+        let emitter = ProgressEmitter::single(Some(sink), 1, "https://tiktok/x");
+        let tracker = ProgressTracker::new(emitter, MediaTarget::video(), Some(300 * 1024));
         tracker.add(1024);
         tracker.add(300 * 1024);
         tracker.complete();
         let events = events.lock().unwrap();
-        assert!(matches!(events[0], ProgressEvent::MediaStarted { .. }));
+        assert!(matches!(
+            events[0].stage,
+            ProgressStage::MediaStarted { .. }
+        ));
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, ProgressEvent::MediaProgress { .. }))
+                .any(|event| matches!(event.stage, ProgressStage::MediaProgress { .. }))
         );
         assert!(matches!(
-            events.last().unwrap(),
-            ProgressEvent::MediaCompleted { .. }
+            events.last().unwrap().stage,
+            ProgressStage::MediaCompleted { .. }
         ));
+    }
+
+    #[test]
+    fn batch_child_carries_index() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let events = events.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let root = ProgressEmitter::batch(Some(sink), 9, 2);
+        root.child("https://tiktok/a", 1, 2)
+            .emit(ProgressStage::Resolving);
+        let event = &events.lock().unwrap()[0];
+        assert_eq!(event.job_id, 9);
+        assert_eq!(event.batch_index, Some(1));
+        assert_eq!(event.batch_total, Some(2));
     }
 }

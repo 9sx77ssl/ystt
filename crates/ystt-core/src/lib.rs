@@ -10,7 +10,6 @@ pub mod error;
 pub mod file_cache;
 pub mod media;
 pub mod metadata;
-pub mod metrics;
 pub mod model;
 pub mod parse;
 pub mod plan;
@@ -26,9 +25,10 @@ pub use error::{ErrorInfo, PartialFailure, Result, YsttError};
 pub use file_cache::{CachedFile, FileCache, FileCacheEntry};
 pub use media::{DownloadedFile, sanitize_filename};
 pub use metadata::{CachedMetadata, MetadataCache, default_metadata_root, filter_session_cookie};
-pub use metrics::{TransferKind, TransferMetric};
 pub use model::{Author, Bitrate, ImageInfo, MediaInfo, MediaKind, Music, TikTokItem, VideoInfo};
 pub use parse::{PageParse, extract_universal_json, parse_page};
 pub use plan::{ByteRange, RangePlan, RangePlanner};
-pub use progress::{MediaTarget, ProgressEvent, ProgressReporter, ProgressSink, progress_channel};
+pub use progress::{
+    MediaTarget, ProgressEvent, ProgressReporter, ProgressSink, ProgressStage, progress_channel,
+};
 pub use url::{TikTokUrl, find_post_id_in_html, get_post_id};

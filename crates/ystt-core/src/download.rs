@@ -1,7 +1,8 @@
 //! End-to-end TikTok resolution and download pipeline.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, stream};
@@ -20,10 +21,9 @@ use crate::media::{
     DownloadedFile, MediaContext, audio_ext, base_filename, download_media, photo_ext, video_ext,
 };
 use crate::metadata::{MetadataCache, default_metadata_root};
-use crate::metrics::{TransferKind, TransferMetric};
 use crate::model::{MediaInfo, MediaKind, TikTokItem};
 use crate::parse::{PageParse, parse_embed_page, parse_page};
-use crate::progress::{MediaTarget, ProgressEvent, ProgressReporter};
+use crate::progress::{MediaTarget, ProgressEmitter, ProgressReporter, ProgressStage, next_job_id};
 use crate::url::{TikTokUrl, find_post_id_in_html};
 
 /// Stage timings for one download.
@@ -64,8 +64,6 @@ pub struct DownloadResult {
     pub audio: Option<DownloadedFile>,
     /// Gallery items that failed under partial mode.
     pub failures: Vec<PartialFailure>,
-    /// Per-CDN transfer metrics for this job.
-    pub metrics: Vec<TransferMetric>,
     /// Whether the result came from the content-addressed file cache.
     pub cache_hit: bool,
     /// Stage timings.
@@ -73,7 +71,7 @@ pub struct DownloadResult {
 }
 
 /// Options for one batch download job.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BatchOptions {
     /// Maximum number of URLs downloaded concurrently (capped at 64).
     pub concurrency: usize,
@@ -89,8 +87,27 @@ pub struct BatchOptions {
     pub metadata_cache: Option<bool>,
     /// Allow partial gallery results.
     pub allow_partial: Option<bool>,
+    /// Progress reporter for batch and item events.
+    pub progress: Option<ProgressReporter>,
     /// Cancellation token shared by every item.
     pub signal: Option<CancellationToken>,
+}
+
+impl std::fmt::Debug for BatchOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BatchOptions")
+            .field("concurrency", &self.concurrency)
+            .field("output_dir", &self.output_dir)
+            .field("quality", &self.quality)
+            .field("include_audio", &self.include_audio)
+            .field("file_cache", &self.file_cache)
+            .field("metadata_cache", &self.metadata_cache)
+            .field("allow_partial", &self.allow_partial)
+            .field("progress", &self.progress.is_some())
+            .field("signal", &self.signal.is_some())
+            .finish()
+    }
 }
 
 impl Default for BatchOptions {
@@ -110,6 +127,7 @@ impl BatchOptions {
             file_cache: None,
             metadata_cache: None,
             allow_partial: None,
+            progress: None,
             signal: None,
         }
     }
@@ -153,6 +171,12 @@ impl BatchOptions {
     /// Allow partial gallery results.
     pub fn allow_partial(mut self, allow: bool) -> Self {
         self.allow_partial = Some(allow);
+        self
+    }
+
+    /// Attach a batch progress reporter.
+    pub fn progress(mut self, reporter: ProgressReporter) -> Self {
+        self.progress = Some(reporter);
         self
     }
 
@@ -315,15 +339,27 @@ impl Ystt {
 
     /// Resolve metadata without downloading media.
     pub async fn resolve(&self, url: &str) -> Result<MediaInfo> {
-        Ok(self
-            .resolve_internal(url, &DownloadOptions::default())
-            .await?
-            .info)
+        self.resolve_with(url, &DownloadOptions::default()).await
     }
 
     /// Resolve with per-call overrides.
     pub async fn resolve_with(&self, url: &str, options: &DownloadOptions) -> Result<MediaInfo> {
-        Ok(self.resolve_internal(url, options).await?.info)
+        let job_id = next_job_id();
+        let emitter = ProgressEmitter::single(options.progress.clone(), job_id, url);
+        emitter.emit(ProgressStage::Resolving);
+        let result = self.resolve_internal(url, options, &emitter).await;
+        match &result {
+            Ok(info) => emitter.emit(ProgressStage::Resolved {
+                post_id: info.info.post_id.clone(),
+                media_count: info.info.video_url.is_some() as usize
+                    + info.info.photo_urls.len()
+                    + info.info.audio_url.is_some() as usize,
+            }),
+            Err(error) => emitter.emit(ProgressStage::Failed {
+                error: error.info(),
+            }),
+        }
+        result.map(|resolved| resolved.info)
     }
 
     /// Download a post with default options.
@@ -337,6 +373,23 @@ impl Ystt {
         url: &str,
         options: DownloadOptions,
     ) -> Result<DownloadResult> {
+        let job_id = next_job_id();
+        let emitter = ProgressEmitter::single(options.progress.clone(), job_id, url);
+        let result = self.download_with_emitter(url, options, &emitter).await;
+        if let Err(error) = &result {
+            emitter.emit(ProgressStage::Failed {
+                error: error.info(),
+            });
+        }
+        result
+    }
+
+    async fn download_with_emitter(
+        &self,
+        url: &str,
+        options: DownloadOptions,
+        emitter: &ProgressEmitter,
+    ) -> Result<DownloadResult> {
         let started = Instant::now();
         let output_dir = options
             .output_dir
@@ -347,28 +400,20 @@ impl Ystt {
         let file_cache_enabled = options.file_cache.unwrap_or(self.config.file_cache);
         let allow_partial = options.allow_partial.unwrap_or(self.config.allow_partial);
 
-        emit(
-            &options,
-            ProgressEvent::Resolving {
-                url: url.to_owned(),
-            },
-        );
+        emitter.emit(ProgressStage::Resolving);
 
         if file_cache_enabled
             && let Some(result) = self
-                .try_file_cache(url, &options, &output_dir, quality, include_audio)
+                .try_file_cache(url, &options, &output_dir, quality, include_audio, emitter)
                 .await?
         {
-            emit(
-                &options,
-                ProgressEvent::Completed {
-                    total_ms: result.timings.total_ms,
-                },
-            );
+            emitter.emit(ProgressStage::Completed {
+                total_ms: result.timings.total_ms,
+            });
             return Ok(result);
         }
 
-        let mut resolved = self.resolve_internal(url, &options).await?;
+        let mut resolved = self.resolve_internal(url, &options, emitter).await?;
 
         if resolved.info.is_age_restricted {
             return Err(YsttError::AgeRestricted);
@@ -377,19 +422,16 @@ impl Ystt {
             return Err(YsttError::NoMedia);
         }
 
-        emit(
-            &options,
-            ProgressEvent::Resolved {
-                post_id: resolved.info.post_id.clone(),
-                media_count: resolved.info.video_url.is_some() as usize
-                    + resolved.info.photo_urls.len()
-                    + (include_audio && resolved.info.audio_url.is_some()) as usize,
-            },
-        );
+        emitter.emit(ProgressStage::Resolved {
+            post_id: resolved.info.post_id.clone(),
+            media_count: resolved.info.video_url.is_some() as usize
+                + resolved.info.photo_urls.len()
+                + (include_audio && resolved.info.audio_url.is_some()) as usize,
+        });
 
         let mut media_elapsed = Duration::ZERO;
         let mut re_resolved = false;
-        let (video, photos, audio, failures, media_metrics) = loop {
+        let (video, photos, audio, failures) = loop {
             let attempt_started = Instant::now();
             match self
                 .transfer(
@@ -397,6 +439,7 @@ impl Ystt {
                     &output_dir,
                     &options,
                     resolved.cookie.as_deref(),
+                    emitter,
                 )
                 .await
             {
@@ -415,7 +458,9 @@ impl Ystt {
                             self.cache.invalidate(&resolved.cache_key).await;
                             let _ = self.metadata.invalidate(&resolved.cache_key).await;
                         }
-                        resolved = self.resolve_internal_mode(url, &options, false).await?;
+                        resolved = self
+                            .resolve_internal_mode(url, &options, false, emitter)
+                            .await?;
                         re_resolved = true;
                         continue;
                     }
@@ -438,8 +483,6 @@ impl Ystt {
         let mut timings = resolved.timings;
         timings.media_ms = millis(media_elapsed);
         timings.total_ms = millis(started.elapsed());
-        let mut metrics = resolved.metrics.clone();
-        metrics.extend(media_metrics);
 
         if file_cache_enabled && failures.is_empty() {
             let key = file_cache_key(&resolved.info.post_id, quality, include_audio);
@@ -471,16 +514,12 @@ impl Ystt {
             photos,
             audio,
             failures,
-            metrics,
             cache_hit: false,
             timings,
         };
-        emit(
-            &options,
-            ProgressEvent::Completed {
-                total_ms: result.timings.total_ms,
-            },
-        );
+        emitter.emit(ProgressStage::Completed {
+            total_ms: result.timings.total_ms,
+        });
         Ok(result)
     }
 
@@ -495,6 +534,12 @@ impl Ystt {
     {
         let started = Instant::now();
         let urls: Vec<String> = urls.into_iter().map(Into::into).collect();
+        let total_items = urls.len();
+        let job_id = next_job_id();
+        let root = ProgressEmitter::batch(options.progress.clone(), job_id, total_items);
+        root.emit(ProgressStage::BatchStarted { total_items });
+        let completed_items = Arc::new(AtomicUsize::new(0));
+        let failed_items = Arc::new(AtomicUsize::new(0));
         let concurrency = if options.concurrency == 0 {
             4
         } else {
@@ -503,6 +548,10 @@ impl Ystt {
         let mut items = stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
             let downloader = self.clone();
             let batch = options.clone();
+            let item_emitter = root.child(&url, index, total_items);
+            let batch_emitter = root.clone();
+            let completed_items = completed_items.clone();
+            let failed_items = failed_items.clone();
             async move {
                 let mut item_options = DownloadOptions::new();
                 item_options.output_dir = batch.output_dir.clone();
@@ -512,18 +561,41 @@ impl Ystt {
                 item_options.metadata_cache = batch.metadata_cache;
                 item_options.allow_partial = batch.allow_partial;
                 item_options.signal = batch.signal.clone();
-                let item = match downloader.download_with(&url, item_options).await {
+                let result = downloader
+                    .download_with_emitter(&url, item_options, &item_emitter)
+                    .await;
+                let item = match result {
                     Ok(result) => BatchItemResult {
                         url,
                         result: Some(result),
                         error: None,
                     },
-                    Err(error) => BatchItemResult {
-                        url,
-                        result: None,
-                        error: Some(error.info()),
-                    },
+                    Err(error) => {
+                        item_emitter.emit(ProgressStage::Failed {
+                            error: error.info(),
+                        });
+                        BatchItemResult {
+                            url,
+                            result: None,
+                            error: Some(error.info()),
+                        }
+                    }
                 };
+                if item.result.is_some() {
+                    let completed = completed_items.fetch_add(1, Ordering::Relaxed) + 1;
+                    batch_emitter.emit(ProgressStage::BatchProgress {
+                        completed_items: completed,
+                        failed_items: failed_items.load(Ordering::Relaxed),
+                        total_items,
+                    });
+                } else {
+                    let failed = failed_items.fetch_add(1, Ordering::Relaxed) + 1;
+                    batch_emitter.emit(ProgressStage::BatchProgress {
+                        completed_items: completed_items.load(Ordering::Relaxed),
+                        failed_items: failed,
+                        total_items,
+                    });
+                }
                 (index, item)
             }
         }))
@@ -531,9 +603,18 @@ impl Ystt {
         .collect::<Vec<_>>()
         .await;
         items.sort_by_key(|(index, _)| *index);
+        let results: Vec<BatchItemResult> = items.into_iter().map(|(_, item)| item).collect();
+        let successes = results.iter().filter(|item| item.result.is_some()).count();
+        let failures = results.len().saturating_sub(successes);
+        let total_ms = millis(started.elapsed());
+        root.emit(ProgressStage::BatchCompleted {
+            total_ms,
+            successes,
+            failures,
+        });
         BatchResult {
-            items: items.into_iter().map(|(_, item)| item).collect(),
-            total_ms: millis(started.elapsed()),
+            items: results,
+            total_ms,
         }
     }
 
@@ -544,6 +625,7 @@ impl Ystt {
         output_dir: &Path,
         quality: QualityPolicy,
         include_audio: bool,
+        emitter: &ProgressEmitter,
     ) -> Result<Option<DownloadResult>> {
         let started = Instant::now();
         let parsed = TikTokUrl::parse(url)?;
@@ -592,12 +674,9 @@ impl Ystt {
         let media_elapsed = materialize_started.elapsed();
         let mut info = entry.info;
         info.source_url = url.to_owned();
-        emit(
-            options,
-            ProgressEvent::CacheHit {
-                post_id: info.post_id.clone(),
-            },
-        );
+        emitter.emit(ProgressStage::CacheHit {
+            post_id: info.post_id.clone(),
+        });
 
         Ok(Some(DownloadResult {
             post_id: info.post_id,
@@ -609,7 +688,6 @@ impl Ystt {
             photos,
             audio,
             failures: Vec::new(),
-            metrics: Vec::new(),
             cache_hit: true,
             timings: Timings {
                 resolve_ms: millis(elapsed),
@@ -676,12 +754,12 @@ impl Ystt {
         output_dir: &Path,
         options: &DownloadOptions,
         cookie: Option<&str>,
+        emitter: &ProgressEmitter,
     ) -> Result<(
         Option<DownloadedFile>,
         Vec<DownloadedFile>,
         Option<DownloadedFile>,
         Vec<PartialFailure>,
-        Vec<TransferMetric>,
     )> {
         let parallel_ranges = options
             .parallel_ranges
@@ -698,7 +776,6 @@ impl Ystt {
         let include_audio = options.include_audio.unwrap_or(self.config.include_audio);
         let reuse_existing = options.reuse_existing.unwrap_or(self.config.reuse_existing);
         let media_retries = options.media_retries.unwrap_or(self.config.media_retries);
-        let metrics = Arc::new(Mutex::new(Vec::new()));
 
         let context = MediaContext {
             client: &self.http,
@@ -714,12 +791,11 @@ impl Ystt {
             range_threshold: self.config.range_threshold,
             reuse_existing,
             media_retries,
-            progress: options.progress.clone(),
+            progress: Some(emitter.clone()),
             adaptive_ranges: options
                 .adaptive_ranges
                 .unwrap_or(self.config.adaptive_ranges),
             range_start_connections: self.config.range_start_connections,
-            metrics: metrics.clone(),
         };
 
         let base = base_filename(&info.author.id, &info.post_id);
@@ -827,16 +903,16 @@ impl Ystt {
 
         let (video, (photos, failures), audio) =
             tokio::try_join!(video_future, photos_future, audio_future)?;
-        let mut metrics = metrics
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        metrics.sort_by_key(|metric| (metric.kind, metric.index));
-        Ok((video, photos, audio, failures, metrics))
+        Ok((video, photos, audio, failures))
     }
 
-    async fn resolve_internal(&self, url: &str, options: &DownloadOptions) -> Result<Resolved> {
-        self.resolve_internal_mode(url, options, self.config.use_embed)
+    async fn resolve_internal(
+        &self,
+        url: &str,
+        options: &DownloadOptions,
+        emitter: &ProgressEmitter,
+    ) -> Result<Resolved> {
+        self.resolve_internal_mode(url, options, self.config.use_embed, emitter)
             .await
     }
 
@@ -845,6 +921,7 @@ impl Ystt {
         url: &str,
         options: &DownloadOptions,
         allow_embed: bool,
+        emitter: &ProgressEmitter,
     ) -> Result<Resolved> {
         let started = Instant::now();
         let parsed = TikTokUrl::parse(url)?;
@@ -872,7 +949,6 @@ impl Ystt {
                 from_embed: false,
                 cache_key,
                 cookie: None,
-                metrics: Vec::new(),
             });
         }
 
@@ -892,7 +968,6 @@ impl Ystt {
                 from_embed: false,
                 cache_key,
                 cookie: entry.cookie,
-                metrics: Vec::new(),
             });
         }
 
@@ -910,13 +985,13 @@ impl Ystt {
             match self.fetch_embed(&post_id, signal).await? {
                 Some(outcome) => outcome,
                 None => {
-                    self.fetch_detail(&page_url, &post_id, signal, options.progress.as_ref())
+                    self.fetch_detail(&page_url, &post_id, signal, Some(emitter))
                         .await?
                 }
             }
         } else {
             match self
-                .fetch_detail(&page_url, &post_id, signal, options.progress.as_ref())
+                .fetch_detail(&page_url, &post_id, signal, Some(emitter))
                 .await
             {
                 Ok(outcome) => outcome,
@@ -1014,7 +1089,6 @@ impl Ystt {
             from_embed,
             cache_key,
             cookie,
-            metrics: outcome.metrics,
         })
     }
 
@@ -1113,7 +1187,6 @@ impl Ystt {
             cookies.absorb(&set_cookie);
         }
 
-        let protocol = response.protocol();
         let body_started = Instant::now();
         let html = match response
             .text(
@@ -1130,15 +1203,6 @@ impl Ystt {
             }
         };
         let body_elapsed = body_started.elapsed();
-        let transfer_elapsed = started.elapsed();
-        let metric = TransferMetric::new(
-            &url,
-            TransferKind::Page,
-            None,
-            protocol,
-            html.len() as u64,
-            transfer_elapsed,
-        );
         let parse_started = Instant::now();
         let item = parse_embed_page(&html, post_id);
         let parse_elapsed = parse_started.elapsed();
@@ -1158,7 +1222,6 @@ impl Ystt {
             parse: parse_elapsed,
             cookie: cookies.header(),
             from_embed: true,
-            metrics: vec![metric],
         }))
     }
 
@@ -1167,7 +1230,7 @@ impl Ystt {
         page_url: &str,
         expected_post_id: &str,
         signal: Option<&CancellationToken>,
-        progress: Option<&ProgressReporter>,
+        progress: Option<&ProgressEmitter>,
     ) -> Result<FetchOutcome> {
         let fetch_started = Instant::now();
         let mut cookies = CookieJar::default();
@@ -1210,7 +1273,6 @@ impl Ystt {
             }
 
             let version = response.version();
-            let protocol = response.protocol();
             let body_started = Instant::now();
             let html = response
                 .text(
@@ -1219,15 +1281,6 @@ impl Ystt {
                     signal,
                 )
                 .await?;
-            let transfer_elapsed = request_started.elapsed();
-            let metric = TransferMetric::new(
-                page_url,
-                TransferKind::Page,
-                None,
-                protocol,
-                html.len() as u64,
-                transfer_elapsed,
-            );
             debug!(
                 attempt,
                 ?version,
@@ -1255,7 +1308,6 @@ impl Ystt {
                         parse: parse_total,
                         cookie: cookies.header(),
                         from_embed: false,
-                        metrics: vec![metric],
                     });
                 }
                 PageParse::NoItem => {
@@ -1275,7 +1327,7 @@ impl Ystt {
                             continue;
                         }
                         if let Some(progress) = progress {
-                            progress.report(ProgressEvent::WafChallenge { attempt });
+                            progress.emit(ProgressStage::WafChallenge { attempt });
                         }
                         let solver = self.waf.clone();
                         let challenge_for_worker = challenge.clone();
@@ -1288,7 +1340,7 @@ impl Ystt {
                         let solve_elapsed = solve_started.elapsed();
                         waf_total += solve_elapsed;
                         if let Some(progress) = progress {
-                            progress.report(ProgressEvent::WafSolved {
+                            progress.emit(ProgressStage::WafSolved {
                                 elapsed_ms: millis(solve_elapsed),
                             });
                         }
@@ -1596,7 +1648,6 @@ struct Resolved {
     from_embed: bool,
     cache_key: String,
     cookie: Option<String>,
-    metrics: Vec<TransferMetric>,
 }
 
 struct FetchOutcome {
@@ -1606,7 +1657,6 @@ struct FetchOutcome {
     parse: Duration,
     cookie: Option<String>,
     from_embed: bool,
-    metrics: Vec<TransferMetric>,
 }
 
 #[derive(Default)]
@@ -1678,12 +1728,6 @@ async fn sleep_or_cancel(duration: Duration, signal: Option<&CancellationToken>)
 
 fn millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn emit(options: &DownloadOptions, event: ProgressEvent) {
-    if let Some(progress) = &options.progress {
-        progress.report(event);
-    }
 }
 
 fn file_cache_key(post_id: &str, quality: QualityPolicy, include_audio: bool) -> String {

@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
@@ -16,10 +15,9 @@ use tracing::{debug, warn};
 use ystt_net::{BrowserHeaders, HttpClient, HttpResponse, NetError, RequestKind, RequestOptions};
 
 use crate::error::{Result, YsttError};
-use crate::metrics::{TransferKind, TransferMetric};
 use crate::model::{MediaKind, is_https_url};
 use crate::plan::{AdaptiveRangeController, ByteRange, RangePlanner};
-use crate::progress::{MediaTarget, ProgressReporter, ProgressTracker};
+use crate::progress::{MediaTarget, ProgressEmitter, ProgressTracker};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -56,10 +54,9 @@ pub(crate) struct MediaContext<'a> {
     pub range_threshold: u64,
     pub reuse_existing: bool,
     pub media_retries: u32,
-    pub progress: Option<ProgressReporter>,
+    pub progress: Option<ProgressEmitter>,
     pub adaptive_ranges: bool,
     pub range_start_connections: usize,
-    pub metrics: Arc<Mutex<Vec<TransferMetric>>>,
 }
 
 /// Download one media resource into `path`.
@@ -90,12 +87,12 @@ pub(crate) async fn download_media(
 
     let tracker = context
         .progress
-        .as_ref()
-        .map(|reporter| ProgressTracker::new(reporter.clone(), target, None));
+        .clone()
+        .map(|emitter| ProgressTracker::new(emitter, target, None));
 
     let size = match kind {
         MediaKind::Video if context.parallel_ranges => {
-            match download_adaptive(context, url, path, target, tracker.clone()).await {
+            match download_adaptive(context, url, path, tracker.clone()).await {
                 Ok(size) => size,
                 Err(error) if should_fallback(&error) => {
                     warn!(?error, "range download failed; falling back to one stream");
@@ -111,31 +108,6 @@ pub(crate) async fn download_media(
         tracker.complete();
     }
     DownloadedFile::from_path(path, url, kind, size)
-}
-
-fn record_metric(
-    context: &MediaContext<'_>,
-    target: MediaTarget,
-    url: &str,
-    protocol: &str,
-    bytes: u64,
-    elapsed: Duration,
-) {
-    let kind = match target.kind {
-        MediaKind::Video => TransferKind::Video,
-        MediaKind::Photo => TransferKind::Photo,
-        MediaKind::Audio => TransferKind::Audio,
-    };
-    if let Ok(mut metrics) = context.metrics.lock() {
-        metrics.push(TransferMetric::new(
-            url,
-            kind,
-            target.index,
-            protocol,
-            bytes,
-            elapsed,
-        ));
-    }
 }
 
 fn should_fallback(error: &YsttError) -> bool {
@@ -178,10 +150,8 @@ async fn download_single(
     }
 
     let version = response.version();
-    let protocol = response.protocol();
     let body_started = Instant::now();
     let written = write_response_to_path(context, response, path, kind, tracker.as_deref()).await?;
-    let elapsed = request_started.elapsed();
     debug!(
         ?version,
         headers_ms = headers_elapsed.as_millis() as u64,
@@ -189,7 +159,6 @@ async fn download_single(
         bytes = written,
         "single media transfer"
     );
-    record_metric(context, target, url, protocol, written, elapsed);
     Ok(written)
 }
 
@@ -197,7 +166,6 @@ async fn download_adaptive(
     context: &MediaContext<'_>,
     url: &str,
     path: &Path,
-    target: MediaTarget,
     tracker: Option<std::sync::Arc<ProgressTracker>>,
 ) -> Result<u64> {
     let headers = BrowserHeaders::build(
@@ -222,7 +190,6 @@ async fn download_adaptive(
         return Err(media_status_error(&response));
     }
     let version = response.version();
-    let protocol = response.protocol();
 
     let total = response.content_length();
     let accepts_ranges = response
@@ -248,7 +215,6 @@ async fn download_adaptive(
             tracker.as_deref(),
         )
         .await?;
-        let elapsed = request_started.elapsed();
         debug!(
             ?version,
             headers_ms = headers_elapsed.as_millis() as u64,
@@ -256,7 +222,6 @@ async fn download_adaptive(
             bytes = written,
             "adaptive single media transfer"
         );
-        record_metric(context, target, url, protocol, written, elapsed);
         return Ok(written);
     }
 
@@ -345,15 +310,6 @@ async fn download_adaptive(
         total,
         "adaptive range media transfer"
     );
-    record_metric(
-        context,
-        target,
-        url,
-        protocol,
-        total,
-        request_started.elapsed(),
-    );
-
     Ok(total)
 }
 

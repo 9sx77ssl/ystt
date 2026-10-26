@@ -8,7 +8,7 @@ performance and decisions. The user-facing API is in `GUIDE.md`.
 ```text
 ystt-waf   (no ystt deps)   challenge parsing + parallel SHA-256 solver
 ystt-net   (no ystt deps)   wreq client, emulation, retries, rate limits
-ystt-core  (net + waf)      URL/model/parser/media/caches/metrics/pipeline
+ystt-core  (net + waf)      URL/model/parser/media/caches/progress/pipeline
 ystt-cli   (core)           minimal clap front-end
 ystt       (root)           public facade + offline/integration tests
 ```
@@ -180,8 +180,8 @@ fingerprint field remain untouched. Defaults are unchanged; the tuning is
 opt-in for deployments that need larger long-lived connections.
 
 The client shares one `wreq::Client`; page, video, photo and audio traffic reuse
-its pool and TLS session cache. `HttpResponse::protocol()` records the negotiated
-version for metrics.
+its pool and TLS session cache. The negotiated HTTP version is included in debug
+logs.
 
 Server session cookies (`ttwid`, `tt_chain_token`, `tt_csrf_token`) are captured
 from the page response and sent to media. In memory they live in a `CookieJar`.
@@ -209,22 +209,25 @@ media plan
   ├─ photo gallery: concurrent single streams
   ├─ video: range-first adaptive
   └─ audio: single stream
-record per-host protocol/throughput metrics
 validate signatures
 atomic rename
 store file cache (if complete)
 ```
 
-### Batch and metrics
+### Batch and progress
 
 `Ystt::download_many` runs independent URL jobs with `buffer_unordered`, indexed
 results and a bounded concurrency. It reuses the same HTTP pool, WAF solver and
 caches. Results are sorted back into input order; failures are captured as
 `ErrorInfo` slots instead of aborting the batch.
 
-Each completed page/media transfer appends a `TransferMetric`:
-`host`, `kind`, optional photo index, negotiated protocol, bytes, elapsed time and
-derived bits/s. Metrics are serialized with `DownloadResult` and batch items.
+Every single download, resolve call and batch emits context-aware
+`ProgressEvent`s. Each event includes `job_id`, optional `url`, and for batch
+items `batch_index` / `batch_total`. `BatchStarted` and `BatchCompleted` frame
+the batch; item failures emit `Failed`; `BatchProgress` carries aggregate
+completed/failed counts. Media progress is reported by the same
+`ProgressTracker` used by solo downloads. `BatchOptions::progress` attaches a
+reporter to the batch and all its items.
 
 ### Adaptive video transfer
 
@@ -410,7 +413,7 @@ Same 30.35 MiB video, five fresh processes each, no output cache:
 
 | Runtime | Runs (ms) | Average | Median |
 |---|---|---:|---:|
-| Rust 1.1.0 | 3056 / 2773 / 2956 / 2939 / 2891 | **2923 ms** | **2939 ms** |
+| Rust 1.1.0-1.2.0 | 3056 / 2773 / 2956 / 2939 / 2891 | **2923 ms** | **2939 ms** |
 | Bun 1.4.3 | 2867 / 2786 / 2932 / 2884 / 2607 | **2815 ms** | **2867 ms** |
 
 Cold single-file time is network-bound: page TTFB is ~0.55 s and the 30 MiB
@@ -467,7 +470,6 @@ TypeScript implementation is not part of this repository.
 - persistent metadata cache with filtered server session cookies, 0600 and TTL;
 - batch API with bounded concurrency and ordered per-item results;
 - shared cache root for file and metadata caches;
-- per-transfer protocol/throughput metrics;
 - opt-in HTTP/2 connection/keep-alive tuning without changing the fingerprint;
 - manual URL/HTML parsing (no regex/panics);
 - full page + H.264 `playAddr` as the default video path;
