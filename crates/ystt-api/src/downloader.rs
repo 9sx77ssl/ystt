@@ -1,6 +1,7 @@
 //! In-process download service and conversion to API descriptors.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, stream};
@@ -16,12 +17,20 @@ use crate::error::ApiError;
 use crate::store::{MediaStore, StoredMedia};
 
 /// Shared in-process download service.
+struct CachedResult {
+    response: DownloadResponse,
+    created: Instant,
+    expires: Instant,
+}
+
+/// Shared in-process download service.
 #[derive(Clone)]
 pub struct Downloader {
     ystt: Ystt,
     permits: Arc<Semaphore>,
     store: MediaStore,
     config: Arc<ApiConfig>,
+    results: Arc<RwLock<HashMap<String, CachedResult>>>,
 }
 
 impl Downloader {
@@ -55,6 +64,7 @@ impl Downloader {
             permits: Arc::new(Semaphore::new(config.workers.max(1))),
             store,
             config,
+            results: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -87,6 +97,10 @@ impl Downloader {
         url: &str,
         input: &DownloadOptionsInput,
     ) -> Result<DownloadResponse, ApiError> {
+        let key = cache_key(url, input);
+        if let Some(response) = self.cached(&key) {
+            return Ok(response);
+        }
         let _permit = self.permits.acquire().await.map_err(|_| {
             ApiError::new(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -100,7 +114,50 @@ impl Downloader {
             .download_bytes_with(url, options)
             .await
             .map_err(ApiError::from)?;
-        self.response(post)
+        let response = self.response(post)?;
+        self.cache(key, response.clone());
+        Ok(response)
+    }
+
+    fn cached(&self, key: &str) -> Option<DownloadResponse> {
+        let now = Instant::now();
+        let mut results = self.results.write().expect("result cache lock");
+        let entry = results.get(key)?;
+        if entry.expires <= now || !response_is_live(&entry.response, &self.store) {
+            results.remove(key);
+            return None;
+        }
+        let mut response = entry.response.clone();
+        response.cache_hit = true;
+        Some(response)
+    }
+
+    fn cache(&self, key: String, response: DownloadResponse) {
+        let now = Instant::now();
+        let mut results = self.results.write().expect("result cache lock");
+        results.retain(|_, entry| entry.expires > now);
+        if results.len() >= 512 {
+            let oldest = results
+                .iter()
+                .min_by_key(|(_, entry)| entry.created)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                results.remove(&oldest);
+            }
+        }
+        results.insert(
+            key,
+            CachedResult {
+                response,
+                created: now,
+                expires: now + self.config.media_ttl,
+            },
+        );
+    }
+
+    /// Number of live cached download results.
+    pub fn result_cache_entries(&self) -> usize {
+        self.results.read().expect("result cache lock").len()
     }
 
     /// Download multiple URLs with bounded concurrency, preserving order.
@@ -220,6 +277,23 @@ impl Downloader {
             duration_sec: file.duration_sec,
         }
     }
+}
+
+fn cache_key(url: &str, input: &DownloadOptionsInput) -> String {
+    let normalized = ystt::TikTokUrl::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.post_id().map(|id| format!("post:{id}")))
+        .unwrap_or_else(|| url.trim().to_owned());
+    format!("{normalized}|{input:?}")
+}
+
+fn response_is_live(response: &DownloadResponse, store: &MediaStore) -> bool {
+    response
+        .video
+        .iter()
+        .chain(response.photos.iter())
+        .chain(response.audio.iter())
+        .all(|descriptor| store.get(&descriptor.token).is_some())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

@@ -131,6 +131,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
         workers: state.config.workers,
         batch_concurrency: state.config.batch_concurrency,
         media_ttl_secs: state.config.media_ttl.as_secs(),
+        result_cache_entries: state.downloader.result_cache_entries(),
     })
 }
 

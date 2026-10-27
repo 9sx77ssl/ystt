@@ -24,7 +24,9 @@ Public base in production: `https://ystt.d9v.uk/api`
 
 Media bytes are never written to disk. `/v1/download` returns short-lived
 authenticated `token`/`url` descriptors; fetch them with the same Bearer key
-before the TTL expires. The store is bounded and evicts oldest entries.
+before the TTL expires. The store is bounded and evicts oldest entries. A second
+in-memory URL/options -> response cache makes repeat downloads return
+`cache_hit: true` without touching TikTok while the media tokens are still live.
 
 ## Examples
 

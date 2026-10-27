@@ -115,6 +115,8 @@ Stable error codes include `unauthorized`, `rate_limited`, `invalid_url`,
 - Per-media cap: 128 MiB.
 - In-memory media store: 768 MiB, TTL 900 seconds.
 - Media tokens are 128-bit random values and are evicted by TTL/size.
+- A bounded URL/options -> response cache (512 entries) returns `cache_hit: true`
+  and skips TikTok entirely while all referenced media tokens are still live.
 - Range requests are supported by `/v1/media/{token}`.
 
 ## Configuration
@@ -148,3 +150,22 @@ systemctl enable --now ystt-api
 
 Nginx needs the `/api/` location from `deploy/nginx-ystt-api.conf`. The API
 process listens only on loopback; TLS terminates at Nginx.
+
+## TLS, Cloudflare and HTTP/2
+
+- Client -> Cloudflare: HTTPS, TLS 1.3, HTTP/2 and advertised HTTP/3.
+- Cloudflare -> origin: HTTPS, origin Nginx TLS 1.2/1.3 with modern ECDHE ciphers.
+- Nginx -> API: loopback HTTP/1.1 with upstream keepalive. This is intentional;
+  TLS and HTTP/2 termination happen at the public edge, not on localhost.
+- Nginx serves HTTP/2 (`http2 on;`) and has a 64-connection upstream keepalive.
+- Media uses `private, max-age=600`; JSON API responses are not cached by
+  Cloudflare (`cf-cache-status: DYNAMIC` in production).
+- Nginx adds HSTS, `nosniff`, `Referrer-Policy`, `X-Frame-Options` and
+  `Permissions-Policy`.
+- Nginx rate-limits `/api/` per `CF-Connecting-IP` (20 r/s, burst 40, 20
+  connections per client) before requests reach the API's own 120/minute token
+  bucket.
+- For stricter edge protection, enable Cloudflare WAF managed rules, a
+  `/api/*` rate-limit rule, Always Use HTTPS and HSTS in the Cloudflare
+  dashboard. The repository cannot set zone settings without a Cloudflare API
+  token.

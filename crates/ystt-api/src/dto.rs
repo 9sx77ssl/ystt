@@ -216,4 +216,6 @@ pub struct StatsResponse {
     pub batch_concurrency: usize,
     /// Configured media TTL in seconds.
     pub media_ttl_secs: u64,
+    /// Number of cached download results.
+    pub result_cache_entries: usize,
 }
