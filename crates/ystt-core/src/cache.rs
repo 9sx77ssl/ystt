@@ -188,6 +188,7 @@ mod tests {
             video_width: None,
             video_height: None,
             duration_sec: None,
+            cover_url: None,
         }
     }
 

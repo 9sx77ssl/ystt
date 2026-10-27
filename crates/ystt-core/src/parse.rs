@@ -145,6 +145,7 @@ pub fn parse_embed_page(html: &str, expected_post_id: &str) -> Option<TikTokItem
                 width,
                 height,
                 duration_sec: duration,
+                cover_url: None,
             }),
             photos: Vec::new(),
             music: None,

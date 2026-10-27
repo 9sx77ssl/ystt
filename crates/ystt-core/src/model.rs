@@ -79,6 +79,8 @@ pub struct VideoInfo {
     pub height: Option<u32>,
     /// Duration in seconds, when known.
     pub duration_sec: Option<u32>,
+    /// Cover image URL, when known.
+    pub cover_url: Option<String>,
 }
 
 /// Image dimensions.
@@ -305,6 +307,8 @@ pub struct MediaInfo {
     pub video_height: Option<u32>,
     /// Default video duration in seconds.
     pub duration_sec: Option<u32>,
+    /// Cover image URL, when known.
+    pub cover_url: Option<String>,
 }
 
 impl MediaInfo {
@@ -396,6 +400,9 @@ pub(crate) struct VideoRaw {
     pub(crate) width: Option<u32>,
     pub(crate) height: Option<u32>,
     pub(crate) duration: Option<u32>,
+    pub(crate) cover: Option<UrlValue>,
+    pub(crate) origin_cover: Option<UrlValue>,
+    pub(crate) dynamic_cover: Option<UrlValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -479,24 +486,33 @@ impl ItemStruct {
                 nickname: None,
             });
 
-        let video = self.video.map(|video| VideoInfo {
-            play_url: video.play_addr.and_then(|value| value.first()),
-            download_url: video.download_addr.and_then(|value| value.first()),
-            bitrates: video
-                .bitrate_info
-                .unwrap_or_default()
-                .into_iter()
-                .map(|bitrate| Bitrate {
-                    bitrate: bitrate.bitrate.unwrap_or(0),
-                    codec: bitrate.codec,
-                    url: bitrate.play_addr.and_then(|value| value.first()),
-                    width: bitrate.width,
-                    height: bitrate.height,
-                })
-                .collect(),
-            width: video.width,
-            height: video.height,
-            duration_sec: video.duration,
+        let video = self.video.map(|video| {
+            let cover_url = video
+                .cover
+                .as_ref()
+                .or(video.origin_cover.as_ref())
+                .or(video.dynamic_cover.as_ref())
+                .and_then(|value| value.first());
+            VideoInfo {
+                play_url: video.play_addr.and_then(|value| value.first()),
+                download_url: video.download_addr.and_then(|value| value.first()),
+                bitrates: video
+                    .bitrate_info
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|bitrate| Bitrate {
+                        bitrate: bitrate.bitrate.unwrap_or(0),
+                        codec: bitrate.codec,
+                        url: bitrate.play_addr.and_then(|value| value.first()),
+                        width: bitrate.width,
+                        height: bitrate.height,
+                    })
+                    .collect(),
+                width: video.width,
+                height: video.height,
+                duration_sec: video.duration,
+                cover_url,
+            }
         });
 
         let photos = self
@@ -581,6 +597,7 @@ mod tests {
                 width: Some(1080),
                 height: Some(1920),
                 duration_sec: Some(8),
+                cover_url: None,
             }),
             photos: vec![],
             music: None,

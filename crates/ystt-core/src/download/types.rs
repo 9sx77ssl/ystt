@@ -74,6 +74,8 @@ pub struct InMemoryVideo {
     pub height: Option<u32>,
     /// Duration in seconds, when known.
     pub duration_sec: Option<u32>,
+    /// Cover image URL, when known.
+    pub cover_url: Option<String>,
     /// MIME type of the payload.
     pub mime: String,
     /// Extension without a dot.

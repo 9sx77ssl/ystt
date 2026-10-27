@@ -21,7 +21,7 @@ use crate::cache_util::{sanitize_key, temp_sibling, unix_now};
 use crate::error::Result;
 use crate::model::MediaInfo;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const DEFAULT_MAX_ENTRIES: usize = 256;
 const SESSION_COOKIE_NAMES: [&str; 3] = ["ttwid", "tt_chain_token", "tt_csrf_token"];
 
@@ -294,6 +294,7 @@ mod tests {
             video_width: None,
             video_height: None,
             duration_sec: None,
+            cover_url: None,
         }
     }
 

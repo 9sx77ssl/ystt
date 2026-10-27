@@ -26,6 +26,7 @@ through a content-addressed cache.
 - Batch API with bounded concurrency and per-item cancellation.
 - In-memory video downloads for bots and streaming services, with no media
   files written to disk.
+- TikTok cover URLs in the public media model for real video previews.
 - Parallel HTTP range downloads assembled directly in memory for large videos.
 - Optional shared cache root across output directories.
 - Cross-process file-cache locks.

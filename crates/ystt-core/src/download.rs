@@ -622,6 +622,10 @@ impl Ystt {
         let video_width = item.video.as_ref().and_then(|video| video.width);
         let video_height = item.video.as_ref().and_then(|video| video.height);
         let duration_sec = item.video.as_ref().and_then(|video| video.duration_sec);
+        let cover_url = item
+            .video
+            .as_ref()
+            .and_then(|video| video.cover_url.clone());
         let is_slideshow = !item.photos.is_empty();
         // Photo posts also carry a placeholder `video` object with a relative
         // URL. If the post has gallery images, photos are the media.
@@ -652,6 +656,7 @@ impl Ystt {
             video_width,
             video_height,
             duration_sec,
+            cover_url,
         };
 
         if !info.has_media() && !info.is_age_restricted {

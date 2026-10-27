@@ -136,6 +136,7 @@ impl Ystt {
             width: resolved.info.video_width,
             height: resolved.info.video_height,
             duration_sec: resolved.info.duration_sec,
+            cover_url: resolved.info.cover_url,
             mime,
             ext,
             media_url,
