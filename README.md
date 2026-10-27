@@ -324,7 +324,7 @@ module's yt-dlp fallback. Both implementations produce the same SHA-256 output.
 | SoundCloud 4.17 MiB AAC track, peak RSS | **22.5 MiB** | 45.7 MiB |
 | SoundCloud 4.17 MiB AAC track, CPU | **0.057 s** | 0.125 s |
 | SoundCloud 15-track playlist, cold | **5.0 s** | n/a (TS reference rejects playlists) |
-| SoundCloud 184-track playlist, API | **105 s** | n/a |
+| SoundCloud 184-track playlist, API cold | **24.3 s** | n/a |
 
 Cold single-file downloads are dominated by the TikTok page TTFB and CDN
 throughput, so expect parity with other clients on the same edge. The cache and

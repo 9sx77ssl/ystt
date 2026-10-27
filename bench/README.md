@@ -26,8 +26,9 @@ implementations wrote the same 4,371,992-byte file with SHA-256
 | Same track, peak RSS | **22.5 MiB** | 45.7 MiB |
 | Same track, CPU user+sys | **0.057 s** | 0.125 s |
 | 15-track playlist, cold | **5.02 s** | not supported by TS reference |
-| 184-track playlist, API | **105.3 s** | not supported by TS reference |
+| 184-track playlist, API cold | **24.3 s** | not supported by TS reference |
 | 184-track playlist, API artifact bytes | 680.2 MiB | n/a |
+| 184-track playlist, API warm result cache | **0.19 s** | n/a |
 
 ## Honest wins/losses
 
