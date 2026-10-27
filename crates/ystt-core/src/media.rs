@@ -18,7 +18,9 @@ pub use ext::sanitize_filename;
 pub(crate) use ext::{audio_ext, base_filename, mime_for_ext, photo_ext, video_ext};
 #[cfg(test)]
 pub(crate) use transfer::parse_content_range;
-pub(crate) use transfer::{download_adaptive, download_resume, download_single, should_fallback};
+pub(crate) use transfer::{
+    download_adaptive, download_media_bytes, download_resume, download_single, should_fallback,
+};
 #[cfg(test)]
 pub(crate) use validation::validate_download;
 #[cfg(test)]

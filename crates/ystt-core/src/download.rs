@@ -29,11 +29,14 @@ use self::job::DownloadJob;
 use self::options::ResolvedOptions;
 
 mod batch;
+mod bytes;
 mod job;
 mod options;
 mod types;
 
-pub use types::{BatchItemResult, BatchOptions, BatchResult, DownloadResult, Timings};
+pub use types::{
+    BatchItemResult, BatchOptions, BatchResult, DownloadResult, InMemoryVideo, Timings,
+};
 
 /// Main public downloader facade.
 #[derive(Clone)]

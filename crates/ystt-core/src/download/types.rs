@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -50,6 +51,37 @@ pub struct DownloadResult {
     pub failures: Vec<PartialFailure>,
     /// Whether the result came from the content-addressed file cache.
     pub cache_hit: bool,
+    /// Stage timings.
+    pub timings: Timings,
+}
+
+/// One video held fully in memory.
+#[derive(Debug, Clone)]
+pub struct InMemoryVideo {
+    /// Post ID.
+    pub post_id: String,
+    /// Original input.
+    pub source_url: String,
+    /// Canonical page URL.
+    pub page_url: String,
+    /// Author.
+    pub author: crate::model::Author,
+    /// Caption.
+    pub description: Option<String>,
+    /// Video width, when known.
+    pub width: Option<u32>,
+    /// Video height, when known.
+    pub height: Option<u32>,
+    /// Duration in seconds, when known.
+    pub duration_sec: Option<u32>,
+    /// MIME type of the payload.
+    pub mime: String,
+    /// Extension without a dot.
+    pub ext: String,
+    /// Source CDN URL.
+    pub media_url: String,
+    /// Complete video payload.
+    pub bytes: Bytes,
     /// Stage timings.
     pub timings: Timings,
 }

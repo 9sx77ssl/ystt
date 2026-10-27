@@ -15,6 +15,7 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - content-addressed file cache (BLAKE3) with TTL and atomic manifests;
 - persistent metadata/signed-URL cache across processes;
 - batch API with bounded concurrency and per-item cancellation;
+- in-memory video downloads with no media files written to disk;
 - shared cache root across output directories;
 - cross-process file-cache locks;
 - resumable videos and filename templates;
@@ -136,6 +137,18 @@ async fn main() -> Result<(), ystt::YsttError> {
     Ok(())
 }
 ```
+
+### In-memory downloads
+
+```rust
+let video = ystt
+    .download_video_bytes_with(url, DownloadOptions::new().max_bytes(49 * 1024 * 1024))
+    .await?;
+println!("{} bytes, {}", video.bytes.len(), video.mime);
+```
+
+No media or cache files are created. Use this path for Telegram bots, HTTP
+streaming and other consumers that need the bytes immediately.
 
 ## Configuration groups
 

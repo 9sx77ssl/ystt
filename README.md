@@ -24,6 +24,8 @@ through a content-addressed cache.
 - BLAKE3 content-addressed file cache with TTL and atomic manifests.
 - Persistent metadata/signed-URL cache across processes.
 - Batch API with bounded concurrency and per-item cancellation.
+- In-memory video downloads for bots and streaming services, with no media
+  files written to disk.
 - Optional shared cache root across output directories.
 - Cross-process file-cache locks.
 - Resumable videos and configurable filename templates.
@@ -104,6 +106,26 @@ async fn main() -> Result<(), ystt::YsttError> {
     Ok(())
 }
 ```
+
+### In-memory video
+
+```rust
+use ystt::{DownloadOptions, Ystt};
+
+let ystt = Ystt::builder()
+    .file_cache(false)
+    .metadata_cache(false)
+    .build()?;
+let video = ystt
+    .download_video_bytes_with(url, DownloadOptions::new().max_bytes(49 * 1024 * 1024))
+    .await?;
+send_to_telegram(video.bytes, &video.mime, video.duration_sec).await;
+```
+
+`download_video_bytes` / `download_video_bytes_with` resolve the post and return
+the complete video as `bytes::Bytes`. They never create media or cache files;
+metadata caching can be enabled independently. `InMemoryVideo` also exposes the
+post ID, author, dimensions, duration and stage timings.
 
 `Ystt` is cloneable and safe to share between async tasks. `MediaInfo`,
 `DownloadResult`, `Timings`, `DownloadedFile` and `ErrorInfo`

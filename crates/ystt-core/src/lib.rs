@@ -21,7 +21,8 @@ pub mod url;
 pub use cache::{UrlCache, signed_url_ttl};
 pub use config::{DownloadOptions, QualityPolicy, YsttConfig};
 pub use download::{
-    BatchItemResult, BatchOptions, BatchResult, DownloadResult, Timings, Ystt, YsttBuilder,
+    BatchItemResult, BatchOptions, BatchResult, DownloadResult, InMemoryVideo, Timings, Ystt,
+    YsttBuilder,
 };
 pub use error::{ErrorInfo, PartialFailure, Result, YsttError};
 pub use file_cache::{CachedFile, FileCache, FileCacheEntry};

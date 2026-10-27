@@ -173,6 +173,36 @@ async fn audio_failure_is_reported_and_video_is_not_cached() {
 }
 
 #[tokio::test]
+async fn video_downloads_into_memory_without_touching_disk() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("output");
+    let ystt = Ystt::builder()
+        .output_dir(&output)
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    let video = ystt
+        .download_video_bytes_with(
+            video_url(),
+            DownloadOptions::new().max_bytes(16 * 1024 * 1024),
+        )
+        .await
+        .unwrap();
+    assert_eq!(video.post_id, "123");
+    assert_eq!(video.mime, "video/mp4");
+    assert!(video.bytes.len() > 1000);
+    assert_eq!(&video.bytes[4..8], b"ftyp");
+    assert!(
+        !output.exists(),
+        "in-memory download must not create output files"
+    );
+    assert_eq!(server.counters.media.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn filename_template_is_used() {
     let server = support::start().await;
     let dir = tempfile::tempdir().unwrap();

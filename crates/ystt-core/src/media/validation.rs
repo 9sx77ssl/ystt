@@ -12,8 +12,16 @@ pub(crate) async fn validate_download(path: &Path, kind: MediaKind) -> Result<()
     let mut file = File::open(path).await?;
     let mut head = [0u8; 16];
     let read = file.read(&mut head).await?;
-    let head = &head[..read];
+    validate_head(&head[..read], kind)
+}
 
+/// Validate a complete in-memory media payload without touching the filesystem.
+pub(crate) fn validate_bytes(bytes: &[u8], kind: MediaKind) -> Result<()> {
+    let head = &bytes[..bytes.len().min(16)];
+    validate_head(head, kind)
+}
+
+fn validate_head(head: &[u8], kind: MediaKind) -> Result<()> {
     if head.is_empty() {
         return Err(YsttError::Parse("empty media file".into()));
     }

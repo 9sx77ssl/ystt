@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use futures_util::StreamExt;
 use http::header::{
     ACCEPT_RANGES, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
@@ -21,7 +22,7 @@ use crate::plan::{AdaptiveRangeController, ByteRange, RangePlanner};
 use crate::progress::{MediaTarget, ProgressTracker};
 
 use super::MediaContext;
-use super::validation::validate_download;
+use super::validation::{validate_bytes, validate_download};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -184,6 +185,64 @@ pub(crate) async fn download_single(
         "single media transfer"
     );
     Ok(written)
+}
+
+/// Download one media resource into memory, without creating any file.
+pub(crate) async fn download_media_bytes(
+    context: &MediaContext<'_>,
+    url: &str,
+    target: MediaTarget,
+    tracker: Option<std::sync::Arc<ProgressTracker>>,
+) -> Result<Bytes> {
+    let headers = BrowserHeaders::build(
+        request_kind(target.kind),
+        Some(context.referer),
+        context.cookie,
+        None,
+    )?;
+    let request_started = Instant::now();
+    let response = context
+        .client
+        .get(
+            url,
+            headers,
+            media_options(context.signal, context.media_retries),
+        )
+        .await?;
+    let headers_elapsed = request_started.elapsed();
+    if !response.is_success() {
+        return Err(media_status_error(&response));
+    }
+    if let Some(total) = response.content_length() {
+        if total > context.max_bytes {
+            return Err(YsttError::FileTooLarge {
+                size: total,
+                limit: context.max_bytes,
+            });
+        }
+        if let Some(tracker) = &tracker {
+            tracker.set_total(total);
+        }
+    }
+
+    let version = response.version();
+    let body_started = Instant::now();
+    let bytes = response
+        .bytes(context.max_bytes, context.read_timeout, context.signal)
+        .await?;
+    validate_bytes(&bytes, target.kind)?;
+    if let Some(tracker) = &tracker {
+        tracker.add(bytes.len() as u64);
+        tracker.complete();
+    }
+    debug!(
+        ?version,
+        headers_ms = headers_elapsed.as_millis() as u64,
+        body_ms = body_started.elapsed().as_millis() as u64,
+        bytes = bytes.len(),
+        "in-memory media transfer"
+    );
+    Ok(bytes)
 }
 
 pub(crate) async fn download_adaptive(

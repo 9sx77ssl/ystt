@@ -69,6 +69,10 @@ pub enum YsttError {
     #[error("no media found in post")]
     NoMedia,
 
+    /// The post has media, but no downloadable video.
+    #[error("post has no downloadable video")]
+    NoVideo,
+
     /// A media file exceeded the configured cap.
     #[error("file is too large: {size} bytes exceeds {limit}")]
     FileTooLarge {
@@ -112,6 +116,7 @@ impl YsttError {
             Self::Waf(_) => "waf",
             Self::Parse(_) => "parse",
             Self::NoMedia => "no_media",
+            Self::NoVideo => "no_video",
             Self::FileTooLarge { .. } => "file_too_large",
             Self::Io(_) => "io",
             Self::Cancelled => "cancelled",
@@ -140,6 +145,7 @@ impl YsttError {
             | Self::Unavailable(_)
             | Self::AgeRestricted
             | Self::NoMedia
+            | Self::NoVideo
             | Self::InvalidUrl(_)
             | Self::Config(_)
             | Self::UnsupportedUrl(_)
