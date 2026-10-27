@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::QualityPolicy;
+use crate::config::{DownloadOptions, QualityPolicy};
 use crate::error::{ErrorInfo, PartialFailure};
 use crate::media::DownloadedFile;
 use crate::progress::ProgressReporter;
@@ -59,22 +59,8 @@ pub struct DownloadResult {
 pub struct BatchOptions {
     /// Maximum number of URLs downloaded concurrently (capped at 64).
     pub concurrency: usize,
-    /// Output directory override.
-    pub output_dir: Option<PathBuf>,
-    /// Quality policy override.
-    pub quality: Option<QualityPolicy>,
-    /// Output filename template override.
-    pub filename_template: Option<String>,
-    /// Include music tracks.
-    pub include_audio: Option<bool>,
-    /// Enable or disable the file cache.
-    pub file_cache: Option<bool>,
-    /// Enable or disable the metadata cache.
-    pub metadata_cache: Option<bool>,
-    /// Allow partial gallery results.
-    pub allow_partial: Option<bool>,
-    /// Enable or disable resumable video downloads.
-    pub resume: Option<bool>,
+    /// Per-item download overrides shared by every URL.
+    pub download: DownloadOptions,
     /// Progress reporter for batch and item events.
     pub progress: Option<ProgressReporter>,
     /// Cancellation token shared by every item.
@@ -88,14 +74,7 @@ impl std::fmt::Debug for BatchOptions {
         formatter
             .debug_struct("BatchOptions")
             .field("concurrency", &self.concurrency)
-            .field("output_dir", &self.output_dir)
-            .field("quality", &self.quality)
-            .field("filename_template", &self.filename_template)
-            .field("include_audio", &self.include_audio)
-            .field("file_cache", &self.file_cache)
-            .field("metadata_cache", &self.metadata_cache)
-            .field("allow_partial", &self.allow_partial)
-            .field("resume", &self.resume)
+            .field("download", &self.download)
             .field("progress", &self.progress.is_some())
             .field("signal", &self.signal.is_some())
             .field("item_signals", &self.item_signals.len())
@@ -114,14 +93,7 @@ impl BatchOptions {
     pub fn new() -> Self {
         Self {
             concurrency: 4,
-            output_dir: None,
-            quality: None,
-            filename_template: None,
-            include_audio: None,
-            file_cache: None,
-            metadata_cache: None,
-            allow_partial: None,
-            resume: None,
+            download: DownloadOptions::new(),
             progress: None,
             signal: None,
             item_signals: std::collections::HashMap::new(),
@@ -136,49 +108,49 @@ impl BatchOptions {
 
     /// Set the output directory.
     pub fn output_dir(mut self, output_dir: impl Into<PathBuf>) -> Self {
-        self.output_dir = Some(output_dir.into());
+        self.download.output_dir = Some(output_dir.into());
         self
     }
 
     /// Set the quality policy.
     pub fn quality(mut self, quality: QualityPolicy) -> Self {
-        self.quality = Some(quality);
+        self.download.quality = Some(quality);
         self
     }
 
     /// Set the output filename template.
     pub fn filename_template(mut self, template: impl Into<String>) -> Self {
-        self.filename_template = Some(template.into());
+        self.download.filename_template = Some(template.into());
         self
     }
 
     /// Include or exclude music.
     pub fn include_audio(mut self, include: bool) -> Self {
-        self.include_audio = Some(include);
+        self.download.include_audio = Some(include);
         self
     }
 
     /// Enable or disable the file cache.
     pub fn file_cache(mut self, enabled: bool) -> Self {
-        self.file_cache = Some(enabled);
+        self.download.file_cache = Some(enabled);
         self
     }
 
     /// Enable or disable the metadata cache.
     pub fn metadata_cache(mut self, enabled: bool) -> Self {
-        self.metadata_cache = Some(enabled);
+        self.download.metadata_cache = Some(enabled);
         self
     }
 
     /// Allow partial gallery results.
     pub fn allow_partial(mut self, allow: bool) -> Self {
-        self.allow_partial = Some(allow);
+        self.download.allow_partial = Some(allow);
         self
     }
 
     /// Enable or disable resumable video downloads.
     pub fn resume(mut self, enabled: bool) -> Self {
-        self.resume = Some(enabled);
+        self.download.resume = Some(enabled);
         self
     }
 

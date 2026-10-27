@@ -235,6 +235,7 @@ tests/              offline and local-HTTP integration tests
 - [`docs/GUIDE.md`](docs/GUIDE.md): CLI, library, progress, caching and JSON API.
 - [`docs/INTERNALS.md`](docs/INTERNALS.md): architecture, parser, WAF math,
   transport, caching and benchmarks.
+- [`ROADMAP.md`](ROADMAP.md): practical next steps and explicit non-goals.
 
 ## License
 

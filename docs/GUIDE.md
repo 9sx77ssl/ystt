@@ -137,6 +137,27 @@ async fn main() -> Result<(), ystt::YsttError> {
 }
 ```
 
+## Configuration groups
+
+`YsttConfig` is grouped by responsibility:
+
+```rust
+use ystt::YsttConfig;
+
+let mut config = YsttConfig::default();
+config.output.dir = "downloads".into();
+config.output.quality = ystt::QualityPolicy::Balanced;
+config.media.photo_concurrency = 12;
+config.cache.metadata = true;
+config.network.http.retries = 2;
+config.resolver.use_embed = false;
+```
+
+Groups: `output`, `media`, `cache`, `network`, `resolver`, `waf`.
+The builder remains the preferred way to construct a downloader. Per-call
+`DownloadOptions` contains only overrides; `BatchOptions` embeds one
+`DownloadOptions` for every item and adds batch concurrency/progress/signals.
+
 ## JSON / web API
 
 `MediaInfo`, `DownloadResult`, `Timings`, `DownloadedFile`, `ErrorInfo` and all progress events implement `serde::Serialize`. A typical Axum

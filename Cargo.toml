@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -27,9 +27,9 @@ todo = "warn"
 unimplemented = "warn"
 
 [workspace.dependencies]
-ystt-waf = { path = "crates/ystt-waf", version = "1.4.0" }
-ystt-net = { path = "crates/ystt-net", version = "1.4.0" }
-ystt-core = { path = "crates/ystt-core", version = "1.4.0" }
+ystt-waf = { path = "crates/ystt-waf", version = "1.5.0" }
+ystt-net = { path = "crates/ystt-net", version = "1.5.0" }
+ystt-core = { path = "crates/ystt-core", version = "1.5.0" }
 
 base64 = "0.23.1"
 blake3 = "1.8.7"

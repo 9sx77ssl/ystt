@@ -58,15 +58,16 @@ impl Ystt {
 
     /// Construct from a complete configuration.
     pub fn new(config: YsttConfig) -> Result<Self> {
-        let http = HttpClient::new(config.http.clone())?;
+        let http = HttpClient::new(config.network.http.clone())?;
         let waf = WafSolver::new(config.waf.clone());
-        let cache = std::sync::Arc::new(UrlCache::new(config.cache_ttl));
+        let cache = std::sync::Arc::new(UrlCache::new(config.cache.url_ttl));
         let metadata_root = config
-            .metadata_cache_dir
+            .cache
+            .metadata_dir
             .clone()
-            .or_else(|| config.cache_dir.as_ref().map(|root| root.join("metadata")))
+            .or_else(|| config.cache.dir.as_ref().map(|root| root.join("metadata")))
             .unwrap_or_else(default_metadata_root);
-        let metadata = MetadataCache::new(metadata_root, config.metadata_cache_ttl);
+        let metadata = MetadataCache::new(metadata_root, config.cache.metadata_ttl);
         Ok(Self {
             config,
             http,
@@ -87,8 +88,8 @@ impl Ystt {
     /// Remove stale file-cache manifests and unreferenced objects.
     pub async fn prune_file_cache(&self) -> Result<usize> {
         FileCache::new(
-            self.file_cache_root(&self.config.output_dir),
-            self.config.file_cache_ttl,
+            self.file_cache_root(&self.config.output.dir),
+            self.config.cache.file_ttl,
         )
         .prune()
         .await
@@ -97,8 +98,8 @@ impl Ystt {
     /// Delete all file-cache manifests and objects.
     pub async fn clear_file_cache(&self) -> Result<()> {
         FileCache::new(
-            self.file_cache_root(&self.config.output_dir),
-            self.config.file_cache_ttl,
+            self.file_cache_root(&self.config.output.dir),
+            self.config.cache.file_ttl,
         )
         .clear()
         .await
@@ -135,8 +136,8 @@ impl Ystt {
         include_audio: bool,
     ) -> Result<bool> {
         FileCache::new(
-            self.file_cache_root(&self.config.output_dir),
-            self.config.file_cache_ttl,
+            self.file_cache_root(&self.config.output.dir),
+            self.config.cache.file_ttl,
         )
         .invalidate(&file_cache_key(post_id, quality, include_audio))
         .await
@@ -199,11 +200,15 @@ impl Ystt {
         let output_dir = options
             .output_dir
             .clone()
-            .unwrap_or_else(|| self.config.output_dir.clone());
-        let quality = options.quality.unwrap_or(self.config.quality);
-        let include_audio = options.include_audio.unwrap_or(self.config.include_audio);
-        let file_cache_enabled = options.file_cache.unwrap_or(self.config.file_cache);
-        let allow_partial = options.allow_partial.unwrap_or(self.config.allow_partial);
+            .unwrap_or_else(|| self.config.output.dir.clone());
+        let quality = options.quality.unwrap_or(self.config.output.quality);
+        let include_audio = options
+            .include_audio
+            .unwrap_or(self.config.output.include_audio);
+        let file_cache_enabled = options.file_cache.unwrap_or(self.config.cache.file);
+        let allow_partial = options
+            .allow_partial
+            .unwrap_or(self.config.output.allow_partial);
 
         emitter.emit(ProgressStage::Resolving);
 
@@ -345,7 +350,7 @@ impl Ystt {
         let signal = options.signal.as_ref();
         let post_id = self.resolve_post_id(&parsed, signal).await?;
         let key = file_cache_key(&post_id, quality, include_audio);
-        let cache = FileCache::new(self.file_cache_root(output_dir), self.config.file_cache_ttl);
+        let cache = FileCache::new(self.file_cache_root(output_dir), self.config.cache.file_ttl);
         let lock = cache.lock(&key).await?;
 
         let Some(entry) = cache.get(&key).await else {
@@ -424,7 +429,7 @@ impl Ystt {
         audio: &Option<DownloadedFile>,
         output_dir: &Path,
     ) -> Result<()> {
-        let cache = FileCache::new(self.file_cache_root(output_dir), self.config.file_cache_ttl);
+        let cache = FileCache::new(self.file_cache_root(output_dir), self.config.cache.file_ttl);
         let video = match video {
             Some(file) => Some(cache.cached_file(file).await?),
             None => None,
@@ -454,11 +459,13 @@ impl Ystt {
 
     fn file_cache_root(&self, output_dir: &Path) -> PathBuf {
         self.config
-            .file_cache_dir
+            .cache
+            .file_dir
             .clone()
             .or_else(|| {
                 self.config
-                    .cache_dir
+                    .cache
+                    .dir
                     .as_ref()
                     .map(|root| root.join("files"))
             })
@@ -480,21 +487,25 @@ impl Ystt {
     )> {
         let parallel_ranges = options
             .parallel_ranges
-            .unwrap_or(self.config.parallel_ranges);
+            .unwrap_or(self.config.media.parallel_ranges);
         let max_connections = options
             .max_connections
-            .unwrap_or(self.config.max_connections)
+            .unwrap_or(self.config.media.max_connections)
             .max(1);
         let photo_concurrency = options
             .photo_concurrency
-            .unwrap_or(self.config.photo_concurrency)
+            .unwrap_or(self.config.media.photo_concurrency)
             .max(1);
-        let max_bytes = options.max_bytes.unwrap_or(self.config.max_bytes);
-        let include_audio = options.include_audio.unwrap_or(self.config.include_audio);
-        let reuse_existing = options.reuse_existing.unwrap_or(self.config.reuse_existing);
-        let resume = options.resume.unwrap_or(self.config.resume);
-        let media_retries = options.media_retries.unwrap_or(self.config.media_retries);
-        let quality = options.quality.unwrap_or(self.config.quality);
+        let max_bytes = options.max_bytes.unwrap_or(self.config.media.max_bytes);
+        let include_audio = options
+            .include_audio
+            .unwrap_or(self.config.output.include_audio);
+        let reuse_existing = options
+            .reuse_existing
+            .unwrap_or(self.config.output.reuse_existing);
+        let resume = options.resume.unwrap_or(self.config.media.resume);
+        let media_retries = options.media_retries.unwrap_or(self.config.media.retries);
+        let quality = options.quality.unwrap_or(self.config.output.quality);
 
         let context = MediaContext {
             client: &self.http,
@@ -502,27 +513,28 @@ impl Ystt {
             cookie,
             signal: options.signal.as_ref(),
             max_bytes,
-            read_timeout: self.config.http.read_timeout,
+            read_timeout: self.config.network.http.read_timeout,
             parallel_ranges,
             max_connections,
-            first_chunk: self.config.range_first_chunk,
-            min_chunk: self.config.range_min_chunk,
-            range_threshold: self.config.range_threshold,
+            first_chunk: self.config.media.range_first_chunk,
+            min_chunk: self.config.media.range_min_chunk,
+            range_threshold: self.config.media.range_threshold,
             reuse_existing,
             resume,
             media_retries,
             progress: Some(emitter.clone()),
             adaptive_ranges: options
                 .adaptive_ranges
-                .unwrap_or(self.config.adaptive_ranges),
-            range_start_connections: self.config.range_start_connections,
+                .unwrap_or(self.config.media.adaptive_ranges),
+            range_start_connections: self.config.media.range_start_connections,
         };
 
         let spec = quality.as_str();
-        let template = options
+        let template = options.filename_template.as_deref().or(self
+            .config
+            .output
             .filename_template
-            .as_deref()
-            .or(self.config.filename_template.as_deref());
+            .as_deref());
         let base = base_filename(template, &info.author.id, &info.post_id, spec);
         let output_dir = output_dir.to_path_buf();
         let video_url = info.video_url.clone();
@@ -637,7 +649,7 @@ impl Ystt {
         options: &DownloadOptions,
         emitter: &ProgressEmitter,
     ) -> Result<Resolved> {
-        self.resolve_internal_mode(url, options, self.config.use_embed, emitter)
+        self.resolve_internal_mode(url, options, self.config.resolver.use_embed, emitter)
             .await
     }
 
@@ -656,9 +668,9 @@ impl Ystt {
 
         let post_id = self.resolve_post_id(&parsed, signal).await?;
 
-        let quality = options.quality.unwrap_or(self.config.quality);
+        let quality = options.quality.unwrap_or(self.config.output.quality);
         let cache_key = format!("{post_id}:{}", quality.as_str());
-        let metadata_enabled = options.metadata_cache.unwrap_or(self.config.metadata_cache);
+        let metadata_enabled = options.metadata_cache.unwrap_or(self.config.cache.metadata);
 
         if let Some(mut cached) = self.cache.get(&cache_key).await {
             cached.source_url = url.to_owned();
@@ -697,7 +709,7 @@ impl Ystt {
         }
 
         let page_url = parsed.page_url(&post_id);
-        let page_url = match &self.config.page_origin {
+        let page_url = match &self.config.resolver.page_origin {
             Some(origin) => page_url.replacen("https://www.tiktok.com", origin, 1),
             None => page_url,
         };
@@ -867,8 +879,8 @@ impl Ystt {
 
         let html = response
             .text(
-                self.config.max_page_bytes,
-                self.config.http.read_timeout,
+                self.config.network.max_page_bytes,
+                self.config.network.http.read_timeout,
                 signal,
             )
             .await?;
@@ -884,6 +896,7 @@ impl Ystt {
     ) -> Result<Option<FetchOutcome>> {
         let origin = self
             .config
+            .resolver
             .page_origin
             .as_deref()
             .unwrap_or("https://www.tiktok.com")
@@ -915,8 +928,8 @@ impl Ystt {
         let body_started = Instant::now();
         let html = match response
             .text(
-                self.config.max_page_bytes,
-                self.config.http.read_timeout,
+                self.config.network.max_page_bytes,
+                self.config.network.http.read_timeout,
                 signal,
             )
             .await
@@ -1001,8 +1014,8 @@ impl Ystt {
             let body_started = Instant::now();
             let html = response
                 .text(
-                    self.config.max_page_bytes,
-                    self.config.http.read_timeout,
+                    self.config.network.max_page_bytes,
+                    self.config.network.http.read_timeout,
                     signal,
                 )
                 .await?;

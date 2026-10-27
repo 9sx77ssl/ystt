@@ -34,20 +34,39 @@ impl QualityPolicy {
     }
 }
 
-/// Downloader-wide configuration.
+/// Output, quality and naming policy.
 #[derive(Debug, Clone)]
-pub struct YsttConfig {
+pub struct OutputConfig {
     /// Default output directory.
-    pub output_dir: PathBuf,
+    pub dir: PathBuf,
     /// Default quality policy.
     pub quality: QualityPolicy,
-    /// Output filename template. Supports `{author}`, `{post_id}`, `{quality}`.
+    /// Filename template with `{author}`, `{post_id}`, `{quality}`.
     pub filename_template: Option<String>,
     /// Download the post's music track in addition to video/photos.
-    ///
-    /// Music is fetched through the normal ALPN Auto transport; H1-only audio
-    /// hosts such as TikTok's `v45` work through the HTTP/1.1 fallback.
     pub include_audio: bool,
+    /// Return successful gallery photos and list failures instead of failing all.
+    pub allow_partial: bool,
+    /// Reuse an existing output file without a network request.
+    pub reuse_existing: bool,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            dir: PathBuf::from("downloads"),
+            quality: QualityPolicy::default(),
+            filename_template: None,
+            include_audio: false,
+            allow_partial: true,
+            reuse_existing: false,
+        }
+    }
+}
+
+/// Media transfer, range and retry policy.
+#[derive(Debug, Clone)]
+pub struct MediaConfig {
     /// Use the range-first parallel downloader for videos.
     pub parallel_ranges: bool,
     /// Maximum simultaneous range connections for one video.
@@ -56,45 +75,10 @@ pub struct YsttConfig {
     pub photo_concurrency: usize,
     /// Maximum size of one media file.
     pub max_bytes: u64,
-    /// Maximum size of an HTML page or JSON payload.
-    pub max_page_bytes: u64,
-    /// HTTP client configuration.
-    pub http: HttpClientConfig,
-    /// WAF solver configuration.
-    pub waf: WafSolverConfig,
-    /// Default signed-URL cache TTL.
-    pub cache_ttl: Duration,
-    /// Reuse an existing output file without a network request.
-    pub reuse_existing: bool,
+    /// Retry budget for each media item.
+    pub retries: u32,
     /// Resume a video from a deterministic `.part` file after interruption.
     pub resume: bool,
-    /// Enable the content-addressed file cache.
-    pub file_cache: bool,
-    /// Optional shared cache root for file and metadata caches.
-    ///
-    /// When set, the file cache uses `<cache_dir>/files` and metadata uses
-    /// `<cache_dir>/metadata`, so different output directories share one cache.
-    pub cache_dir: Option<PathBuf>,
-    /// Optional file-cache root. `None` means `<cache_dir>/files` or
-    /// `<output_dir>/.ystt-cache`.
-    pub file_cache_dir: Option<PathBuf>,
-    /// File-cache TTL.
-    pub file_cache_ttl: Duration,
-    /// Cache resolved metadata and signed URLs across processes.
-    pub metadata_cache: bool,
-    /// Optional metadata-cache root. `None` means `<cache_dir>/metadata` or the
-    /// platform user cache directory.
-    pub metadata_cache_dir: Option<PathBuf>,
-    /// Metadata-cache TTL ceiling. Signed-URL expiry may shorten it.
-    pub metadata_cache_ttl: Duration,
-    /// Try the lightweight embed resolver before the full page.
-    pub use_embed: bool,
-    /// Advanced: override the page origin (for local integration tests or mirrors).
-    pub page_origin: Option<String>,
-    /// Retry budget for each media item.
-    pub media_retries: u32,
-    /// Return successful gallery photos and list failures instead of failing all.
-    pub allow_partial: bool,
     /// Adapt range concurrency while downloading.
     pub adaptive_ranges: bool,
     /// Initial connections for adaptive range downloads.
@@ -107,34 +91,15 @@ pub struct YsttConfig {
     pub range_threshold: u64,
 }
 
-impl Default for YsttConfig {
+impl Default for MediaConfig {
     fn default() -> Self {
         Self {
-            output_dir: PathBuf::from("downloads"),
-            quality: QualityPolicy::default(),
-            filename_template: None,
-            include_audio: false,
             parallel_ranges: true,
             max_connections: 6,
             photo_concurrency: 12,
             max_bytes: 512 * 1024 * 1024,
-            max_page_bytes: 4 * 1024 * 1024,
-            http: HttpClientConfig::default(),
-            waf: WafSolverConfig::default(),
-            cache_ttl: Duration::from_secs(10 * 60),
-            reuse_existing: false,
+            retries: 2,
             resume: false,
-            file_cache: true,
-            cache_dir: None,
-            file_cache_dir: None,
-            file_cache_ttl: Duration::from_secs(24 * 60 * 60),
-            metadata_cache: true,
-            metadata_cache_dir: None,
-            metadata_cache_ttl: Duration::from_secs(10 * 60),
-            page_origin: None,
-            use_embed: false,
-            media_retries: 2,
-            allow_partial: true,
             adaptive_ranges: true,
             range_start_connections: 2,
             range_first_chunk: 8 * 1024 * 1024,
@@ -142,6 +107,86 @@ impl Default for YsttConfig {
             range_threshold: 64 * 1024 * 1024,
         }
     }
+}
+
+/// File, metadata and signed-URL cache policy.
+#[derive(Debug, Clone)]
+pub struct CacheConfig {
+    /// Enable the content-addressed file cache.
+    pub file: bool,
+    /// Enable the persistent metadata/signed-URL cache.
+    pub metadata: bool,
+    /// Shared cache root used by both caches.
+    pub dir: Option<PathBuf>,
+    /// File-cache root override.
+    pub file_dir: Option<PathBuf>,
+    /// File-cache TTL.
+    pub file_ttl: Duration,
+    /// Metadata-cache root override.
+    pub metadata_dir: Option<PathBuf>,
+    /// Metadata-cache TTL ceiling.
+    pub metadata_ttl: Duration,
+    /// In-memory signed-URL cache TTL.
+    pub url_ttl: Duration,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            file: true,
+            metadata: true,
+            dir: None,
+            file_dir: None,
+            file_ttl: Duration::from_secs(24 * 60 * 60),
+            metadata_dir: None,
+            metadata_ttl: Duration::from_secs(10 * 60),
+            url_ttl: Duration::from_secs(10 * 60),
+        }
+    }
+}
+
+/// HTTP and page-size limits.
+#[derive(Debug, Clone)]
+pub struct NetworkConfig {
+    /// HTTP client configuration.
+    pub http: HttpClientConfig,
+    /// Maximum size of an HTML page or JSON payload.
+    pub max_page_bytes: u64,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            http: HttpClientConfig::default(),
+            max_page_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
+
+/// Resolver strategy and test/mirror origin.
+#[derive(Debug, Clone, Default)]
+pub struct ResolverConfig {
+    /// Try the lightweight embed resolver before the full page.
+    pub use_embed: bool,
+    /// Advanced: override the page origin for local tests or mirrors.
+    pub page_origin: Option<String>,
+}
+
+/// Downloader-wide configuration.
+#[derive(Debug, Clone, Default)]
+pub struct YsttConfig {
+    /// Output and naming policy.
+    pub output: OutputConfig,
+    /// Media transfer policy.
+    pub media: MediaConfig,
+    /// Cache policy.
+    pub cache: CacheConfig,
+    /// Network policy.
+    pub network: NetworkConfig,
+    /// Resolver policy.
+    pub resolver: ResolverConfig,
+    /// WAF solver configuration.
+    pub waf: WafSolverConfig,
 }
 
 /// Per-call overrides. `None` means "use [`YsttConfig`]".
@@ -324,13 +369,13 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let config = YsttConfig::default();
-        assert_eq!(config.output_dir, PathBuf::from("downloads"));
-        assert_eq!(config.quality, QualityPolicy::Balanced);
-        assert!(config.parallel_ranges);
-        assert_eq!(config.max_connections, 6);
-        assert_eq!(config.range_threshold, 64 * 1024 * 1024);
-        assert!(config.metadata_cache);
-        assert!(config.cache_dir.is_none());
+        assert_eq!(config.output.dir, PathBuf::from("downloads"));
+        assert_eq!(config.output.quality, QualityPolicy::Balanced);
+        assert!(config.media.parallel_ranges);
+        assert_eq!(config.media.max_connections, 6);
+        assert_eq!(config.media.range_threshold, 64 * 1024 * 1024);
+        assert!(config.cache.metadata);
+        assert!(config.cache.dir.is_none());
     }
 
     #[test]

@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use futures_util::{StreamExt, stream};
 
-use crate::config::DownloadOptions;
 use crate::progress::{ProgressEmitter, ProgressStage, next_job_id};
 
 use super::{BatchItemResult, BatchOptions, BatchResult, Ystt, millis};
@@ -42,15 +41,8 @@ impl Ystt {
             let completed_items = completed_items.clone();
             let failed_items = failed_items.clone();
             async move {
-                let mut item_options = DownloadOptions::new();
-                item_options.output_dir = batch.output_dir.clone();
-                item_options.quality = batch.quality;
-                item_options.filename_template = batch.filename_template.clone();
-                item_options.include_audio = batch.include_audio;
-                item_options.file_cache = batch.file_cache;
-                item_options.metadata_cache = batch.metadata_cache;
-                item_options.allow_partial = batch.allow_partial;
-                item_options.resume = batch.resume;
+                let mut item_options = batch.download.clone();
+                item_options.progress = None;
                 item_options.signal = batch
                     .item_signals
                     .get(&index)
