@@ -1,7 +1,7 @@
 //! OpenAPI contract and snapshot checks.
 //!
-//! This runs without a browser, Node or npx. It is the Rust half of the
-//! Bun-only schema workflow (`bun scripts/check-openapi.ts` is the other half).
+//! This runs as part of the normal Rust test suite. It checks the generated
+//! contract, all response descriptions, references and the committed snapshot.
 
 use std::collections::HashSet;
 use std::fs;
@@ -66,11 +66,11 @@ fn generated_document_is_contract_valid_and_committed() {
     let generated = serde_json::to_string_pretty(&document).unwrap() + "\n";
     let committed_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../openapi.json");
     let committed = fs::read_to_string(committed_path).unwrap_or_else(|error| {
-        panic!("cannot read {committed_path}: {error}; run `bun scripts/sync-openapi.ts`")
+        panic!("cannot read {committed_path}: {error}; refresh the root openapi.json")
     });
     assert_eq!(
         committed, generated,
-        "openapi.json is stale; run `bun scripts/sync-openapi.ts` (Bun only)"
+        "openapi.json is stale; refresh it from the running API"
     );
 
     let doc: Value = serde_json::from_str(&generated).unwrap();
