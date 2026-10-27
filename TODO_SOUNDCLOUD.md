@@ -35,6 +35,11 @@ fallback, no browser automation at runtime.
 - [x] Reject encrypted HLS rather than silently writing broken audio.
 - [x] Validate output and keep no disk writes.
 - [x] Optional artwork descriptor (URL); API/bot expose it.
+- [x] Native 300×300 JPEG artwork fetch, CLI sidecar, API media token and
+      Telegram thumbnail upload.
+- [x] Candidate fallback across AAC/MP3/Opus transcodings, signed-URL refresh
+      and per-track hydration fallback.
+- [x] Bounded 120 s resolve cache and 24 h CLI disk cache with atomic manifests.
 
 ## Phase 3 — Provider-neutral API/CLI/bot
 
@@ -43,6 +48,9 @@ fallback, no browser automation at runtime.
 - [x] Extend API `/v1/download` and `/v1/resolve`; add OpenAPI schemas.
 - [x] Extend bot: audio placeholders, sendAudio, inline audio, channel mirror,
       file_id/artwork cache.
+- [x] Strict audio/video caption `size / duration / sha256`.
+- [x] Immediate inline placeholders (no cover wait/no inline cooldown), separate
+      `download video ^.^` and `download music ^.^` titles.
 - [x] Mixed TikTok + SoundCloud batches preserve order.
 - [x] Keep existing TikTok flags/semantics working.
 - [x] Provider namespaced cache keys.

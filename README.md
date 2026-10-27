@@ -67,6 +67,8 @@ fMP4/MP3 HLS assembly. Everything is in memory for the API and bot.
   descriptors; Telegram gets the real square cover.
 - Optional disk cache for SoundCloud audio (track ID + quality, 24 h TTL,
   content-addressed objects, atomic manifests). CLI-only; API/bot stay RAM-only.
+- Native fallback across AAC/MP3/Opus candidates and one signed-URL refresh;
+  playlist hydration falls back from batch IDs to per-track lookups.
 - `BLOCK`/`SNIP`/encrypted-HLS tracks are rejected with a typed error instead of
   producing a broken preview file.
 - Auto-detection in CLI/API/bot, including mixed TikTok + SoundCloud batches.
