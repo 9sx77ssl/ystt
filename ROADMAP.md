@@ -17,25 +17,25 @@ analytics, hosted API, Redis/S3 cache, or web framework is part of the project.
 - filename templates;
 - typed progress and JSON-ready results.
 
+## Completed internal refactors
+
+- `ResolvedOptions` merges `YsttConfig` and per-call overrides once.
+- `DownloadJob` owns the cache -> resolve -> transfer -> store-cache state
+  machine.
+- `media.rs` is split into `media/transfer.rs`, `media/validation.rs` and
+  `media/ext.rs`.
+- 403 re-resolution, cache hit, partial gallery, cancellation, resume, audio
+  and filename-template paths have integration coverage.
+
 ## Next: internal maintainability
 
-1. **`ResolvedOptions`**
-   - merge `YsttConfig` and `DownloadOptions` once;
-   - remove repeated `unwrap_or` and option mapping from the pipeline;
-   - keep the public builder API unchanged.
-
-2. **`DownloadJob` state machine**
-   - extract resolve -> cache -> transfer -> store-cache from
-     `download_with_emitter`;
-   - make retry/403 re-resolution explicit and unit-testable.
-
-3. **Split `media/transfer.rs`**
-   - move single/adaptive/range functions out of `media.rs`;
-   - keep validation and extension helpers separate.
-
-4. **Consistent error context**
+1. **Consistent error context**
    - add a structured error chain for media failures (host, kind, status,
      attempt) without recording throughput metrics.
+
+2. **Resolver split**
+   - move page/embed/short-link resolution out of `download.rs`;
+   - keep the public resolver API unchanged.
 
 ## Next: user-facing reliability
 

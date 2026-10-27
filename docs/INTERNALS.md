@@ -9,8 +9,8 @@ performance and decisions. The user-facing API is in `GUIDE.md`.
 ystt-waf   (no ystt deps)   challenge parsing + parallel SHA-256 solver
 ystt-net   (no ystt deps)   wreq client, emulation, retries, rate limits
 ystt-core  (net + waf)      URL/model/parser/media/caches/progress/pipeline
-  download/{types,batch,builder} and media/{ext,validation} are split from the
-  facade modules; transport and cache helpers are independent modules.
+  download/{types,options,job,batch,builder}; media/{transfer,validation,ext}.
+  Transport, cache and cookie helpers are independent modules.
 ystt-cli   (core)           minimal clap front-end
 ystt       (root)           public facade + offline/integration tests
 ```
@@ -217,6 +217,27 @@ validate signatures
 atomic rename
 store file cache (if complete)
 ```
+
+### Option resolution and job state
+
+`ResolvedOptions` merges `YsttConfig` and `DownloadOptions` once per job. The
+pipeline never reads raw config fields or repeated `unwrap_or` defaults.
+
+`DownloadJob` owns the per-URL state machine:
+
+```text
+file-cache lookup / lock
+  -> resolve (URL cache, metadata cache, page/embed)
+  -> transfer (video, photos, audio)
+  -> 403 re-resolve (once)
+  -> partial policy
+  -> file-cache store
+  -> timings + progress
+```
+
+`download_with` is a thin wrapper that creates the progress context and maps
+errors to `ProgressStage::Failed`. `download_many` reuses the same job for every
+item with batch context and per-item cancellation.
 
 ### Batch and progress
 

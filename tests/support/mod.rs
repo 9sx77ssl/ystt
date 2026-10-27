@@ -19,6 +19,8 @@ pub struct Counters {
     pub ranges: AtomicUsize,
     pub media: AtomicUsize,
     pub pages: AtomicUsize,
+    pub reject_media: std::sync::atomic::AtomicBool,
+    pub reject_audio: std::sync::atomic::AtomicBool,
 }
 
 pub struct TestServer {
@@ -126,7 +128,11 @@ async fn handle(mut socket: TcpStream, origin: &str, counters: &Counters) {
         }
         "/media/video.mp4" => {
             counters.media.fetch_add(1, Ordering::Relaxed);
-            if !has_session_cookie(&headers) {
+            if counters
+                .reject_media
+                .load(std::sync::atomic::Ordering::Relaxed)
+                || !has_session_cookie(&headers)
+            {
                 write_response(&mut socket, 403, &[], b"forbidden").await;
                 return;
             }
@@ -134,7 +140,11 @@ async fn handle(mut socket: TcpStream, origin: &str, counters: &Counters) {
         }
         "/media/audio.mp3" => {
             counters.media.fetch_add(1, Ordering::Relaxed);
-            if !has_session_cookie(&headers) {
+            if counters
+                .reject_audio
+                .load(std::sync::atomic::Ordering::Relaxed)
+                || !has_session_cookie(&headers)
+            {
                 write_response(&mut socket, 403, &[], b"forbidden").await;
                 return;
             }

@@ -99,7 +99,7 @@ Defaults:
 - `--cache-dir` shares file and metadata caches across output directories.
 - `--json` writes `ErrorInfo` JSON to stderr when a command fails.
 - `--urls-file` runs a batch from one URL per line (`#` comments and blank lines ignored; max 10,000 URLs / 8 MiB).
-- `--concurrency` controls batch concurrency (default 4, capped at 64).
+- `--concurrency` controls batch concurrency (default 4, capped at 64); it requires `--urls-file`.
 - `--progress` writes one `ProgressEvent` JSON object per line to stderr.
 - `--filename` sets the filename base; placeholders: `{author}`, `{post_id}`,
   `{quality}`. Path separators are sanitized.

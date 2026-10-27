@@ -144,6 +144,35 @@ async fn video_resume_appends_from_part_file() {
 }
 
 #[tokio::test]
+async fn audio_failure_is_reported_and_video_is_not_cached() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    server
+        .counters
+        .reject_audio
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(true)
+        .file_cache_dir(dir.path().join("cache"))
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    let error = ystt
+        .download_with(
+            video_url(),
+            DownloadOptions::new()
+                .output_dir(dir.path())
+                .include_audio(true),
+        )
+        .await
+        .expect_err("audio failure must fail the job");
+    assert_eq!(error.status(), Some(403));
+    assert!(!dir.path().join("cache").join("manifests").exists());
+}
+
+#[tokio::test]
 async fn filename_template_is_used() {
     let server = support::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -399,6 +428,37 @@ async fn concurrent_downloads_share_one_file_cache_lock() {
         "the lock must prevent duplicate media work"
     );
     assert!(a.unwrap().cache_hit || b.unwrap().cache_hit);
+}
+
+#[tokio::test]
+async fn media_403_re_resolves_cached_metadata_once() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    ystt.download_with(video_url(), DownloadOptions::new().output_dir(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(server.counters.pages.load(Ordering::Relaxed), 1);
+    server
+        .counters
+        .reject_media
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let error = ystt
+        .download_with(video_url(), DownloadOptions::new().output_dir(dir.path()))
+        .await
+        .expect_err("media must fail");
+    assert_eq!(error.status(), Some(403));
+    assert_eq!(
+        server.counters.pages.load(Ordering::Relaxed),
+        2,
+        "a cached URL 403 must trigger exactly one full-page re-resolve"
+    );
 }
 
 #[tokio::test]

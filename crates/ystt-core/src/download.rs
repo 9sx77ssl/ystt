@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use futures_util::{StreamExt, stream};
 use http::header::LOCATION;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::debug;
 use ystt_net::{BrowserHeaders, HttpClient, NetError, RequestKind, RequestOptions};
 use ystt_waf::{WafChallenge, WafSolver};
 
@@ -25,7 +25,12 @@ use crate::parse::{PageParse, parse_embed_page, parse_page};
 use crate::progress::{MediaTarget, ProgressEmitter, ProgressStage, next_job_id};
 use crate::url::{TikTokUrl, find_post_id_in_html};
 
+use self::job::DownloadJob;
+use self::options::ResolvedOptions;
+
 mod batch;
+mod job;
+mod options;
 mod types;
 
 pub use types::{BatchItemResult, BatchOptions, BatchResult, DownloadResult, Timings};
@@ -150,10 +155,11 @@ impl Ystt {
 
     /// Resolve with per-call overrides.
     pub async fn resolve_with(&self, url: &str, options: &DownloadOptions) -> Result<MediaInfo> {
+        let opts = ResolvedOptions::resolve(&self.config, options);
         let job_id = next_job_id();
-        let emitter = ProgressEmitter::single(options.progress.clone(), job_id, url);
+        let emitter = ProgressEmitter::single(opts.progress.clone(), job_id, url);
         emitter.emit(ProgressStage::Resolving);
-        let result = self.resolve_internal(url, options, &emitter).await;
+        let result = self.resolve_internal(url, &opts, &emitter).await;
         match &result {
             Ok(info) => emitter.emit(ProgressStage::Resolved {
                 post_id: info.info.post_id.clone(),
@@ -196,161 +202,26 @@ impl Ystt {
         options: DownloadOptions,
         emitter: &ProgressEmitter,
     ) -> Result<DownloadResult> {
-        let started = Instant::now();
-        let output_dir = options
-            .output_dir
-            .clone()
-            .unwrap_or_else(|| self.config.output.dir.clone());
-        let quality = options.quality.unwrap_or(self.config.output.quality);
-        let include_audio = options
-            .include_audio
-            .unwrap_or(self.config.output.include_audio);
-        let file_cache_enabled = options.file_cache.unwrap_or(self.config.cache.file);
-        let allow_partial = options
-            .allow_partial
-            .unwrap_or(self.config.output.allow_partial);
-
-        emitter.emit(ProgressStage::Resolving);
-
-        let (cached, cache_lock) = if file_cache_enabled {
-            self.try_file_cache(url, &options, &output_dir, quality, include_audio, emitter)
-                .await?
-        } else {
-            (None, None)
-        };
-        if let Some(result) = cached {
-            emitter.emit(ProgressStage::Completed {
-                total_ms: result.timings.total_ms,
-            });
-            return Ok(result);
-        }
-
-        let mut resolved = self.resolve_internal(url, &options, emitter).await?;
-
-        if resolved.info.is_age_restricted {
-            return Err(YsttError::AgeRestricted);
-        }
-        if !resolved.info.has_media() {
-            return Err(YsttError::NoMedia);
-        }
-
-        emitter.emit(ProgressStage::Resolved {
-            post_id: resolved.info.post_id.clone(),
-            media_count: resolved.info.video_url.is_some() as usize
-                + resolved.info.photo_urls.len()
-                + (include_audio && resolved.info.audio_url.is_some()) as usize,
-        });
-
-        let mut media_elapsed = Duration::ZERO;
-        let mut re_resolved = false;
-        let (video, photos, audio, failures) = loop {
-            let attempt_started = Instant::now();
-            match self
-                .transfer(
-                    &resolved.info,
-                    &output_dir,
-                    &options,
-                    resolved.cookie.as_deref(),
-                    emitter,
-                )
-                .await
-            {
-                Ok(files) => {
-                    media_elapsed += attempt_started.elapsed();
-                    break files;
-                }
-                Err(error) => {
-                    media_elapsed += attempt_started.elapsed();
-                    if !re_resolved
-                        && error.status() == Some(403)
-                        && (resolved.from_cache || resolved.from_embed)
-                    {
-                        debug!("media returned 403; re-resolving with the full page");
-                        if resolved.from_cache {
-                            self.cache.invalidate(&resolved.cache_key).await;
-                            let _ = self.metadata.invalidate(&resolved.cache_key).await;
-                        }
-                        resolved = self
-                            .resolve_internal_mode(url, &options, false, emitter)
-                            .await?;
-                        re_resolved = true;
-                        continue;
-                    }
-                    return Err(error);
-                }
-            }
-        };
-
-        if !allow_partial && !failures.is_empty() {
-            return Err(YsttError::Partial(failures));
-        }
-        if video.is_none() && photos.is_empty() && audio.is_none() {
-            return if failures.is_empty() {
-                Err(YsttError::NoMedia)
-            } else {
-                Err(YsttError::Partial(failures))
-            };
-        }
-
-        let mut timings = resolved.timings;
-        timings.media_ms = millis(media_elapsed);
-        timings.total_ms = millis(started.elapsed());
-
-        if file_cache_enabled && failures.is_empty() {
-            let key = file_cache_key(&resolved.info.post_id, quality, include_audio);
-            if let Err(error) = self
-                .store_file_cache(&key, &resolved.info, &video, &photos, &audio, &output_dir)
-                .await
-            {
-                tracing::warn!(?error, "failed to store file cache");
-            }
-        }
-        drop(cache_lock);
-
-        info!(
-            post_id = %resolved.info.post_id,
-            video = video.is_some(),
-            photos = photos.len(),
-            audio = audio.is_some(),
-            failures = failures.len(),
-            total_ms = timings.total_ms,
-            "download complete"
-        );
-
-        let result = DownloadResult {
-            post_id: resolved.info.post_id,
-            source_url: resolved.info.source_url,
-            page_url: resolved.info.page_url,
-            author: resolved.info.author,
-            description: resolved.info.description,
-            video,
-            photos,
-            audio,
-            failures,
-            cache_hit: false,
-            timings,
-        };
-        emitter.emit(ProgressStage::Completed {
-            total_ms: result.timings.total_ms,
-        });
-        Ok(result)
+        DownloadJob::new(self, url, options, emitter.clone())
+            .run()
+            .await
     }
 
     async fn try_file_cache(
         &self,
         url: &str,
-        options: &DownloadOptions,
-        output_dir: &Path,
-        quality: QualityPolicy,
-        include_audio: bool,
+        opts: &ResolvedOptions,
         emitter: &ProgressEmitter,
     ) -> Result<(Option<DownloadResult>, Option<FileLock>)> {
         let started = Instant::now();
         let parsed = TikTokUrl::parse(url)?;
-        let signal = options.signal.as_ref();
+        let signal = opts.signal.as_ref();
         let post_id = self.resolve_post_id(&parsed, signal).await?;
-        let key = file_cache_key(&post_id, quality, include_audio);
-        let cache = FileCache::new(self.file_cache_root(output_dir), self.config.cache.file_ttl);
+        let key = file_cache_key(&post_id, opts.quality, opts.include_audio);
+        let cache = FileCache::new(
+            self.file_cache_root(&opts.output_dir),
+            self.config.cache.file_ttl,
+        );
         let lock = cache.lock(&key).await?;
 
         let Some(entry) = cache.get(&key).await else {
@@ -359,7 +230,7 @@ impl Ystt {
 
         let materialize_started = Instant::now();
         let video = match &entry.video {
-            Some(cached) => match materialize_cached(&cache, cached, output_dir).await {
+            Some(cached) => match materialize_cached(&cache, cached, &opts.output_dir).await {
                 Ok(file) => Some(file),
                 Err(error) => {
                     tracing::warn!(?error, "failed to materialize cached video");
@@ -370,7 +241,7 @@ impl Ystt {
         };
         let mut photos = Vec::with_capacity(entry.photos.len());
         for cached in &entry.photos {
-            match materialize_cached(&cache, cached, output_dir).await {
+            match materialize_cached(&cache, cached, &opts.output_dir).await {
                 Ok(file) => photos.push(file),
                 Err(error) => {
                     tracing::warn!(?error, "failed to materialize cached photo");
@@ -379,7 +250,7 @@ impl Ystt {
             }
         }
         let audio = match &entry.audio {
-            Some(cached) => match materialize_cached(&cache, cached, output_dir).await {
+            Some(cached) => match materialize_cached(&cache, cached, &opts.output_dir).await {
                 Ok(file) => Some(file),
                 Err(error) => {
                     tracing::warn!(?error, "failed to materialize cached audio");
@@ -475,8 +346,7 @@ impl Ystt {
     async fn transfer(
         &self,
         info: &MediaInfo,
-        output_dir: &Path,
-        options: &DownloadOptions,
+        opts: &ResolvedOptions,
         cookie: Option<&str>,
         emitter: &ProgressEmitter,
     ) -> Result<(
@@ -485,58 +355,44 @@ impl Ystt {
         Option<DownloadedFile>,
         Vec<PartialFailure>,
     )> {
-        let parallel_ranges = options
-            .parallel_ranges
-            .unwrap_or(self.config.media.parallel_ranges);
-        let max_connections = options
-            .max_connections
-            .unwrap_or(self.config.media.max_connections)
-            .max(1);
-        let photo_concurrency = options
-            .photo_concurrency
-            .unwrap_or(self.config.media.photo_concurrency)
-            .max(1);
-        let max_bytes = options.max_bytes.unwrap_or(self.config.media.max_bytes);
-        let include_audio = options
-            .include_audio
-            .unwrap_or(self.config.output.include_audio);
-        let reuse_existing = options
-            .reuse_existing
-            .unwrap_or(self.config.output.reuse_existing);
-        let resume = options.resume.unwrap_or(self.config.media.resume);
-        let media_retries = options.media_retries.unwrap_or(self.config.media.retries);
-        let quality = options.quality.unwrap_or(self.config.output.quality);
+        let parallel_ranges = opts.parallel_ranges;
+        let max_connections = opts.max_connections;
+        let photo_concurrency = opts.photo_concurrency;
+        let max_bytes = opts.max_bytes;
+        let include_audio = opts.include_audio;
+        let reuse_existing = opts.reuse_existing;
+        let resume = opts.resume;
+        let media_retries = opts.media_retries;
+        let quality = opts.quality;
 
         let context = MediaContext {
             client: &self.http,
             referer: &info.page_url,
             cookie,
-            signal: options.signal.as_ref(),
+            signal: opts.signal.as_ref(),
             max_bytes,
             read_timeout: self.config.network.http.read_timeout,
             parallel_ranges,
             max_connections,
-            first_chunk: self.config.media.range_first_chunk,
-            min_chunk: self.config.media.range_min_chunk,
-            range_threshold: self.config.media.range_threshold,
+            first_chunk: opts.range_first_chunk,
+            min_chunk: opts.range_min_chunk,
+            range_threshold: opts.range_threshold,
             reuse_existing,
             resume,
             media_retries,
             progress: Some(emitter.clone()),
-            adaptive_ranges: options
-                .adaptive_ranges
-                .unwrap_or(self.config.media.adaptive_ranges),
-            range_start_connections: self.config.media.range_start_connections,
+            adaptive_ranges: opts.adaptive_ranges,
+            range_start_connections: opts.range_start_connections,
         };
 
         let spec = quality.as_str();
-        let template = options.filename_template.as_deref().or(self
-            .config
-            .output
-            .filename_template
-            .as_deref());
-        let base = base_filename(template, &info.author.id, &info.post_id, spec);
-        let output_dir = output_dir.to_path_buf();
+        let base = base_filename(
+            opts.filename_template.as_deref(),
+            &info.author.id,
+            &info.post_id,
+            spec,
+        );
+        let output_dir = opts.output_dir.clone();
         let video_url = info.video_url.clone();
         let audio_url = info.audio_url.clone();
 
@@ -646,31 +502,31 @@ impl Ystt {
     async fn resolve_internal(
         &self,
         url: &str,
-        options: &DownloadOptions,
+        opts: &ResolvedOptions,
         emitter: &ProgressEmitter,
     ) -> Result<Resolved> {
-        self.resolve_internal_mode(url, options, self.config.resolver.use_embed, emitter)
+        self.resolve_internal_mode(url, opts, self.config.resolver.use_embed, emitter)
             .await
     }
 
     async fn resolve_internal_mode(
         &self,
         url: &str,
-        options: &DownloadOptions,
+        opts: &ResolvedOptions,
         allow_embed: bool,
         emitter: &ProgressEmitter,
     ) -> Result<Resolved> {
         let started = Instant::now();
         let parsed = TikTokUrl::parse(url)?;
-        let signal = options.signal.as_ref();
+        let signal = opts.signal.as_ref();
 
         check_cancelled(signal)?;
 
         let post_id = self.resolve_post_id(&parsed, signal).await?;
 
-        let quality = options.quality.unwrap_or(self.config.output.quality);
+        let quality = opts.quality;
         let cache_key = format!("{post_id}:{}", quality.as_str());
-        let metadata_enabled = options.metadata_cache.unwrap_or(self.config.cache.metadata);
+        let metadata_enabled = opts.metadata_cache;
 
         if let Some(mut cached) = self.cache.get(&cache_key).await {
             cached.source_url = url.to_owned();

@@ -14,7 +14,7 @@ impl Ystt {
     /// Download a batch of URLs with bounded concurrency.
     ///
     /// Results preserve input order. A failed item does not cancel the rest;
-    /// the error is returned as a typed [`ErrorInfo`] in its slot.
+    /// the error is returned as a typed [`crate::error::ErrorInfo`] in its slot.
     pub async fn download_many<I, S>(&self, urls: I, options: BatchOptions) -> BatchResult
     where
         I: IntoIterator<Item = S>,
