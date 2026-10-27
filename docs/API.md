@@ -170,8 +170,9 @@ Stable error codes include `unauthorized`, `rate_limited`, `invalid_url`,
 - Rate limit: 120 requests/minute per client, burst 30.
 - Download workers: 3; batch concurrency: 2.
 - Per-media cap: 128 MiB.
-- In-memory media store: 768 MiB, TTL 900 seconds (raise it if routinely serving
-  100+ track playlists; a 184-track playlist measured ~680 MiB).
+- In-memory media store: 768 MiB default, 1024 MiB on the production host, TTL
+  900 seconds. A 184-track playlist measured ~680 MiB, so large playlists need
+  the larger cap.
 - SoundCloud playlist cap: 200 tracks per request.
 - Media tokens are 128-bit random values and are evicted by TTL/size.
 - A bounded provider-aware URL/options -> response cache (512 entries) returns
