@@ -6,6 +6,7 @@ Telegram bot. It is both a binary and a library.
 - Public base: `https://ystt.d9v.uk/api`
 - Local bind: `127.0.0.1:8091`
 - All `/v1` endpoints require `Authorization: Bearer <YSTT_API_KEY>`.
+  On the server the key is in `/etc/ystt-api/api.env` (`0600`), never in git.
 - Media bytes and metadata are held in a bounded process-local store; no media
   or cache files are written to disk.
 - OpenAPI 3.1 is generated at runtime from the Rust DTOs:
@@ -165,6 +166,8 @@ process listens only on loopback; TLS terminates at Nginx.
 - Nginx rate-limits `/api/` per `CF-Connecting-IP` (20 r/s, burst 40, 20
   connections per client) before requests reach the API's own 120/minute token
   bucket.
+- The API result cache is process-local and intentionally not shared with the
+  CLI file cache, Telegram `file_id` cache or Redis.
 - For stricter edge protection, enable Cloudflare WAF managed rules, a
   `/api/*` rate-limit rule, Always Use HTTPS and HSTS in the Cloudflare
   dashboard. The repository cannot set zone settings without a Cloudflare API

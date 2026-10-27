@@ -1,7 +1,8 @@
 # ystt roadmap
 
 This file lists only work with a concrete user or maintenance benefit. No CI,
-analytics, hosted API, Redis/S3 cache, or web framework is part of the project.
+analytics, Redis/S3 cache, or external hosted service is part of the project.
+The authenticated HTTP API in this repository is a first-class product.
 
 ## Current baseline
 
@@ -15,7 +16,10 @@ analytics, hosted API, Redis/S3 cache, or web framework is part of the project.
 - batch downloads with ordered results, progress and per-item cancellation;
 - resumable single-stream video downloads;
 - filename templates;
-- typed progress and JSON-ready results.
+- typed progress and JSON-ready results;
+- typed authenticated HTTP API with OpenAPI 3.1, in-memory media and response
+  cache;
+- Cloudflare/Nginx TLS, HTTP/2, rate limiting and bounded request handling.
 
 ## Completed internal refactors
 
@@ -26,6 +30,15 @@ analytics, hosted API, Redis/S3 cache, or web framework is part of the project.
   `media/ext.rs`.
 - 403 re-resolution, cache hit, partial gallery, cancellation, resume, audio
   and filename-template paths have integration coverage.
+
+## Completed API work
+
+- Bearer-only API with constant-time auth and per-client rate limiting.
+- Video, gallery and audio downloads with parallel in-memory ranges.
+- `/v1/resolve`, `/v1/download`, `/v1/batch`, `/v1/media/{token}`, `/v1/stats`.
+- 512-entry URL/options response cache; 768 MiB media store; 15-minute TTL.
+- OpenAPI 3.1 generated from Rust DTOs.
+- Nginx edge hardening + rate limiting; API and bot remain separate services.
 
 ## Next: internal maintainability
 
@@ -65,6 +78,13 @@ analytics, hosted API, Redis/S3 cache, or web framework is part of the project.
    - add `--timeout`, `--retries`, `--browser` and `--quiet`;
    - keep `--urls-file`, `--progress`, `--filename` and `--resume` stable.
 
+6. **API operations**
+   - add optional Redis-backed result cache only if the API is horizontally
+     scaled;
+   - add request-scoped progress/SSE without making the synchronous JSON path
+     complicated;
+   - keep OpenAPI paths and DTOs in sync with every new option.
+
 ## Later, only with measurements
 
 1. **HTTP/2 window and keep-alive experiments**
@@ -81,9 +101,9 @@ analytics, hosted API, Redis/S3 cache, or web framework is part of the project.
 
 ## Explicitly out of scope
 
-- web API or hosted service;
-- Axum/OpenAPI/SSE/WebSocket server;
-- Redis/S3/remote cache;
+- SaaS/hosted multi-tenant service;
+- SSE/WebSocket transport;
+- Redis/S3/remote cache for the single-process deployment;
 - account cookies or login-only content;
 - mobile private API and request signatures;
 - HTTP/3;

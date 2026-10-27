@@ -9,9 +9,11 @@ performance and decisions. The user-facing API is in `GUIDE.md`.
 ystt-waf   (no ystt deps)   challenge parsing + parallel SHA-256 solver
 ystt-net   (no ystt deps)   wreq client, emulation, retries, rate limits
 ystt-core  (net + waf)      URL/model/parser/media/caches/progress/pipeline
-  download/{types,options,job,batch,builder}; media/{transfer,validation,ext}.
-  Transport, cache and cookie helpers are independent modules.
+  download/{types,options,job,bytes,batch,builder};
+  media/{transfer,validation,ext}. Transport, cache and cookie helpers are
+  independent modules. The API depends only on the public core facade.
 ystt-cli   (core)           minimal clap front-end
+ystt-api   (core)           Axum HTTP API, DTOs, OpenAPI, RAM store
 ystt       (root)           public facade + offline/integration tests
 ```
 
@@ -67,9 +69,9 @@ The embed page contains `__FRONTITY_CONNECT_STATE__` →
 posts never use it. Its media URL does not require `tt_chain_token`, which makes
 it a useful fallback when the full page is challenged.
 
-`use_embed(true)` changes the order to embed-first. Both full-page and embed
-requests use browser-emulated HTTP/2; there is no HTTP/1 transport in the
-library.
+`use_embed(true)` changes the order to embed-first. Full-page and embed requests
+use the same ALPN Auto client: HTTP/2 where negotiated, HTTP/1.1 for H1-only
+hosts.
 
 ### Quality selection
 
@@ -515,7 +517,59 @@ TypeScript implementation is not part of this repository.
 
 ≈14.5 M hashes/s per thread, near-linear scaling.
 
-## 10. Decisions and limits
+## 10. HTTP API
+
+`ystt-api` is a separate library + binary in the workspace. It reuses the public
+`ystt` pipeline and never shells out to the CLI.
+
+### Surface
+
+- Axum 0.8 on `127.0.0.1:8091`;
+- public base `https://ystt.d9v.uk/api` behind nginx;
+- Bearer auth on every `/v1` route, including the OpenAPI document;
+- `/v1/health`, `/v1/resolve`, `/v1/download`, `/v1/batch`, `/v1/media/{token}`,
+  `/v1/stats`, `/v1/openapi.json`;
+- OpenAPI 3.1 generated from Rust DTOs with `utoipa`.
+
+### In-memory pipeline
+
+`Ystt::download_bytes_with` resolves one post and downloads video, gallery and
+optional audio using `download_media_bytes`. Large video payloads use parallel
+range requests and are assembled as `Bytes` in RAM. The transport reuses the
+same HTTP/2 client, range planner and validation as disk downloads.
+
+The API keeps two bounded structures:
+
+1. `MediaStore` — bytes, MIME/extension, SHA-256, TTL and byte cap;
+2. result cache — canonical post + complete options → `DownloadResponse`,
+   bounded to 512 entries. A hit is valid only while every descriptor token is
+   still present in the media store.
+
+There is no Redis and no disk media cache. Result descriptors are short-lived
+and authenticated; clients fetch bytes through `/v1/media/{token}`.
+
+### Auth and abuse controls
+
+- Bearer secret from `YSTT_API_KEY`, constant-time comparison;
+- token-bucket rate limit per client;
+- global and batch semaphores;
+- 64 KiB request body limit;
+- bounded batch size, media cap and in-memory store;
+- nginx per-`CF-Connecting-IP` request/connection limits;
+- nginx TLS 1.2/1.3, HSTS/security headers and access-log suppression;
+- Cloudflare edge provides TLS 1.3 and HTTP/3 to clients.
+
+### Deployment
+
+```text
+ystt-api.service            127.0.0.1:8091
+/etc/ystt-api/api.env       0600 root, never in git
+deploy/nginx-ystt.conf      canonical edge config
+deploy/nginx-ystt-hardening.conf
+deploy/nginx-ystt-api.conf
+```
+
+## 11. Decisions and limits
 
 ### Accepted
 
@@ -535,7 +589,10 @@ TypeScript implementation is not part of this repository.
 - BLAKE3 content-addressed file cache with copy-in/copy-out;
 - adaptive range concurrency, default 12 photo workers;
 - partial galleries enabled by default;
-- no CI; local fmt/clippy/test/bench before every push.
+- no CI; local fmt/clippy/test/bench before every push;
+- in-memory raw media path for API/bot, with bounded TTL stores;
+- generated OpenAPI and Bearer-only HTTP API;
+- no Redis: single-process RAM caches are sufficient for the current deployment.
 
 ### Evaluated and rejected
 
@@ -549,3 +606,5 @@ TypeScript implementation is not part of this repository.
 - **Language bindings**: Rust library is sufficient for embedding.
 - **Prometheus/OpenTelemetry**: progress events and timings cover the current
   needs without another dependency tree.
+- **Redis as the primary media store**: would add network/persistence and
+  contradict the in-memory API contract; reconsider only for horizontal scale.

@@ -15,8 +15,9 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - content-addressed file cache (BLAKE3) with TTL and atomic manifests;
 - persistent metadata/signed-URL cache across processes;
 - batch API with bounded concurrency and per-item cancellation;
-- in-memory video downloads with no media files written to disk;
+- in-memory video/gallery/audio downloads with no media files written to disk;
 - parallel range downloads assembled directly in memory;
+- authenticated HTTP API with generated OpenAPI 3.1;
 - shared cache root across output directories;
 - cross-process file-cache locks;
 - resumable videos and filename templates;
@@ -37,7 +38,8 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - no mobile API in v1;
 - no private/deleted/login-only posts;
 - no live streams;
-- HTTP/3 was evaluated and intentionally not used (see `INTERNALS.md`).
+- HTTP/3 is not used by the core HTTP client (see `INTERNALS.md`); Cloudflare
+  provides HTTP/3 to clients for the public API edge.
 
 The module keeps **server-set session cookies** from the same page response
 (`ttwid`, `tt_chain_token`, `tt_csrf_token`). The media CDN requires them. When
@@ -151,6 +153,29 @@ println!("{} bytes, {}", video.bytes.len(), video.mime);
 No media or cache files are created. Use this path for Telegram bots, HTTP
 streaming and other consumers that need the bytes immediately.
 
+For galleries and optional music use the generic in-memory API:
+
+```rust
+let post = ystt
+    .download_bytes_with(
+        url,
+        DownloadOptions::new()
+            .include_audio(true)
+            .max_bytes(128 * 1024 * 1024),
+    )
+    .await?;
+println!(
+    "video={} photos={} audio={} failures={}",
+    post.video.is_some(),
+    post.photos.len(),
+    post.audio.is_some(),
+    post.failures.len()
+);
+```
+
+`InMemoryPost`/`InMemoryFile` expose bytes, MIME, extension, dimensions, source
+URL and timings; they never imply an output directory.
+
 ## Configuration groups
 
 `YsttConfig` is grouped by responsibility:
@@ -172,32 +197,46 @@ The builder remains the preferred way to construct a downloader. Per-call
 `DownloadOptions` contains only overrides; `BatchOptions` embeds one
 `DownloadOptions` for every item and adds batch concurrency/progress/signals.
 
-## JSON / web API
+## HTTP API
 
-`MediaInfo`, `DownloadResult`, `Timings`, `DownloadedFile`, `ErrorInfo` and all progress events implement `serde::Serialize`. A typical Axum
-handler is a thin wrapper:
+The workspace has a real API crate, not just a suggested Axum wrapper:
+`ystt-api` is both a library and a binary. It uses the same core pipeline and
+the same typed options as the CLI.
 
-```rust
-use axum::{Json, response::IntoResponse};
-use ystt::{DownloadOptions, Ystt, YsttError};
+- Production base: `https://ystt.d9v.uk/api`
+- All `/v1` routes require `Authorization: Bearer <YSTT_API_KEY>`.
+- OpenAPI 3.1: `GET /v1/openapi.json` (with the key).
+- Endpoints: `health`, `resolve`, `download`, `batch`, `media/{token}`, `stats`.
+- Media bytes live in a bounded RAM store; response descriptors contain a
+  short-lived token and authenticated URL.
+- URL/options → response cache returns `cache_hit: true` without re-downloading
+  while media tokens are live.
+- Request body cap is 64 KiB; server/download/batch/media limits are enforced.
 
-async fn download(
-    ystt: Ystt,
-    url: String,
-) -> Result<Json<ystt::DownloadResult>, (u16, Json<ystt::ErrorInfo>)> {
-    match ystt.download(&url).await {
-        Ok(result) => Ok(Json(result)),
-        Err(error) => {
-            let status = error.status().unwrap_or(500);
-            Err((status, Json(error.info())))
-        }
-    }
-}
+```bash
+KEY=$(ssh root@146.103.50.217 'grep ^YSTT_API_KEY= /etc/ystt-api/api.env | cut -d= -f2-')
+curl -H "Authorization: Bearer $KEY"   -H 'content-type: application/json'   -d '{"url":"https://www.tiktok.com/@user/video/123","include_audio":true}'   https://ystt.d9v.uk/api/v1/download
 ```
 
-`error.code()` returns a stable snake_case code (`unavailable`, `network`,
-`parse`, `cancelled`, ...). `Ystt` is cloneable and safe to share between
-requests; its URL cache and file cache are bounded.
+The JSON API uses typed `MediaDescriptor` tokens instead of file paths because
+the HTTP service never writes files. CLI `DownloadResult` paths and HTTP tokens
+are intentionally different representations of the same core result.
+
+CLI to API mapping:
+
+| CLI | API |
+| --- | --- |
+| `--info` | `POST /v1/resolve` |
+| normal download | `POST /v1/download` |
+| `--audio` | `include_audio: true` |
+| `--quality` | `quality` |
+| `--urls-file` / `--concurrency` | `POST /v1/batch` |
+| `--json` | native typed JSON |
+| `--progress` | stage timings in response (no SSE stream) |
+| `--filename`, `--resume`, output dir, file cache | not applicable: API has no disk |
+
+Detailed endpoint, auth, OpenAPI and edge documentation:
+[`API.md`](API.md).
 
 ## Batch API
 
@@ -438,8 +477,8 @@ dimensions.
 
 `YsttError` variants: `InvalidUrl`, `UnsupportedUrl`, `Config`, `Unavailable`,
 `AgeRestricted`, `NoMedia`, `Network(NetError)`, `Waf(WafError)`, `Parse`,
-`FileTooLarge`, `Io`, `Cancelled`, `Range`, `Partial(Vec<PartialFailure>)`,
-`Internal`.
+`NoVideo`, `FileTooLarge`, `Io`, `Cancelled`, `Range`,
+`Partial(Vec<PartialFailure>)`, `Internal`.
 
 Helpers: `error.status()`, `error.code()`, `error.info()` and
 `error.is_retryable()`. `ErrorInfo` is directly serializable for HTTP APIs.
@@ -457,6 +496,7 @@ they deliberately use `http://127.0.0.1`):
 
 ```bash
 cargo test --features integration-tests --test integration_pipeline
+cargo test -p ystt-api
 ```
 
 Manual real-network smoke is documented in `INTERNALS.md`. Do not run it in loops.
@@ -469,9 +509,12 @@ ystt/
 ├── crates/
 │   ├── ystt-waf/         # challenge parser + parallel SHA-256 solver
 │   ├── ystt-net/         # wreq client, retries, limits, responses
-│   ├── ystt-core/        # URL, parser, model, pipeline, file cache
-│   └── ystt-cli/         # minimal CLI
+│   ├── ystt-core/        # URL, parser, model, pipeline, caches
+│   ├── ystt-cli/         # minimal CLI
+│   └── ystt-api/         # Axum API, DTOs, OpenAPI, RAM store
+├── deploy/               # API service + nginx snippets
 ├── examples/             # download and benchmark examples
-├── docs/                 # GUIDE.md + INTERNALS.md
+├── docs/                 # GUIDE, API and INTERNALS
+├── AGENTS.md             # coding-agent contract
 └── tests/                # offline + local-HTTP tests
 ```

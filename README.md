@@ -1,8 +1,8 @@
 # ystt
 
-**Yet Simple TikTok Toolkit** is a focused Rust library and CLI for downloading
-public TikTok videos, photo galleries and music tracks with as little protocol
-overhead as possible.
+**Yet Simple TikTok Toolkit** is a focused Rust library, CLI and authenticated
+HTTP API for downloading public TikTok videos, photo galleries and music tracks
+with as little protocol overhead as possible.
 
 The project is deliberately small: one typed pipeline, no browser automation, no
 account cookies, no proxies and no mobile-API dependency. It resolves short
@@ -24,10 +24,11 @@ through a content-addressed cache.
 - BLAKE3 content-addressed file cache with TTL and atomic manifests.
 - Persistent metadata/signed-URL cache across processes.
 - Batch API with bounded concurrency and per-item cancellation.
-- In-memory video downloads for bots and streaming services, with no media
-  files written to disk.
+- In-memory video, gallery and audio downloads for bots, HTTP APIs and streaming
+  services, with no media files written to disk.
 - TikTok cover URLs in the public media model for real video previews.
 - Parallel HTTP range downloads assembled directly in memory for large videos.
+- Bounded in-memory media store plus URL/options → response cache for the API.
 - Optional shared cache root across output directories.
 - Cross-process file-cache locks.
 - Resumable videos and configurable filename templates.
@@ -37,7 +38,10 @@ through a content-addressed cache.
 - Unified typed progress for solo downloads and batches.
 - Stage timings.
 - Partial gallery results with per-item retry control.
-- JSON-ready results and stable `ErrorInfo` payloads for HTTP APIs.
+- JSON-ready results, stable `ErrorInfo` payloads, generated OpenAPI 3.1 and
+  Bearer-authenticated HTTP endpoints.
+- Nginx/Cloudflare edge hardening, app-level/Nginx rate limits and bounded
+  request bodies for the API.
 - No account cookies; only a filtered set of server session cookies is kept for
   the media CDN and, when the metadata cache is enabled, persisted with 0600
   permissions for the short signed-URL lifetime.
@@ -50,7 +54,10 @@ Bearer key on every route, supports video/gallery/audio downloads, batch work,
 range media streaming and bounded in-memory media tokens.
 
 - Production base: `https://ystt.d9v.uk/api`
+- Auth: `Authorization: Bearer <YSTT_API_KEY>` on every `/v1` route
 - Schema: `GET /api/v1/openapi.json` with the Bearer key
+- Endpoints: health, resolve, download, batch, media (Range), stats, OpenAPI
+- Media is returned as short-lived authenticated tokens; bytes live in RAM
 - API guide: [`docs/API.md`](docs/API.md)
 - Crate: [`crates/ystt-api`](crates/ystt-api)
 
@@ -139,9 +146,24 @@ send_to_telegram(video.bytes, &video.mime, video.duration_sec).await;
 `download_video_bytes` / `download_video_bytes_with` resolve the post and return
 the complete video as `bytes::Bytes`. Videos above the configured range threshold
 use parallel CDN range requests and are assembled in RAM. They never create media
-or cache files;
-metadata caching can be enabled independently. `InMemoryVideo` also exposes the
-post ID, author, dimensions, duration and stage timings.
+or cache files; metadata caching can be enabled independently. `InMemoryVideo`
+also exposes the post ID, author, dimensions, duration, cover URL and stage
+timings.
+
+For galleries and audio use the generic in-memory API:
+
+```rust
+let post = ystt
+    .download_bytes_with(
+        url,
+        DownloadOptions::new().include_audio(true).max_bytes(128 * 1024 * 1024),
+    )
+    .await?;
+println!("{} photos, audio={}", post.photos.len(), post.audio.is_some());
+```
+
+`InMemoryPost` contains video, photo and audio `InMemoryFile` values, failures and
+timings. No output directory is involved.
 
 `Ystt` is cloneable and safe to share between async tasks. `MediaInfo`,
 `DownloadResult`, `Timings`, `DownloadedFile` and `ErrorInfo`
@@ -249,6 +271,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test --features integration-tests --test integration_pipeline
+cargo test -p ystt-api
+cargo build --release -p ystt-api
 ```
 
 The default suite is offline. The integration suite starts a local HTTP server
@@ -263,7 +287,9 @@ crates/ystt-waf/    challenge parser and parallel SHA-256 solver
 crates/ystt-net/    wreq client, ALPN transport, retries, host limits
 crates/ystt-core/   URL model, parser, pipeline, media, caches
 crates/ystt-cli/    minimal CLI
-docs/               user guide and engineering internals
+crates/ystt-api/    Axum API, DTOs, OpenAPI, Bearer auth, RAM store
+deploy/             API service, nginx snippets and environment example
+docs/               user guide, API and engineering internals
 examples/           download and benchmark examples
 tests/              offline and local-HTTP integration tests
 ```
@@ -271,8 +297,10 @@ tests/              offline and local-HTTP integration tests
 ## Documentation
 
 - [`docs/GUIDE.md`](docs/GUIDE.md): CLI, library, progress, caching and JSON API.
+- [`docs/API.md`](docs/API.md): authenticated HTTP API, OpenAPI, limits and edge.
 - [`docs/INTERNALS.md`](docs/INTERNALS.md): architecture, parser, WAF math,
-  transport, caching and benchmarks.
+  transport, caching, API layer and benchmarks.
+- [`AGENTS.md`](AGENTS.md): coding-agent contract, invariants and deployment.
 - [`ROADMAP.md`](ROADMAP.md): practical next steps and explicit non-goals.
 
 ## License
