@@ -188,7 +188,7 @@ Stable error codes include `unauthorized`, `rate_limited`, `invalid_url`,
 | `YSTT_API_PUBLIC_BASE` | `https://ystt.d9v.uk/api` | public URL prefix |
 | `YSTT_API_MAX_MB` | `128` | per-media cap |
 | `YSTT_API_MEDIA_TTL` | `900` | media token TTL seconds |
-| `YSTT_API_STORE_MB` | `768` | process-local media cap |
+| `YSTT_API_STORE_MB` | `768` (`1024` production) | process-local media cap |
 | `YSTT_API_WORKERS` | `3` | concurrent downloads |
 | `YSTT_API_BATCH_CONCURRENCY` | `2` | batch parallelism |
 | `YSTT_API_MAX_BATCH` | `20` | max batch URLs |

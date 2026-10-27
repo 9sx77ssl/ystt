@@ -55,7 +55,7 @@ fallback, no browser automation at runtime.
 - [x] Integration tests for track, playlist, mixed batch (live + API).
 - [x] Real smoke tests with supplied public links.
 - [x] API auth/rate/OpenAPI/media tests.
-- [x] Bot smoke: real webhook message delivered a SoundCloud track, cached repeat and mixed TikTok+SoundCloud order.
+- [x] Bot smoke: real webhook messages delivered a SoundCloud track, a 2-track playlist, cached repeat and mixed TikTok+SoundCloud order.
 - [x] Bun TS baseline vs Rust:
   - [x] track cold/warm;
   - [x] artifact size/hash;
