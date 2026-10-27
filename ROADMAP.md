@@ -7,6 +7,9 @@ The authenticated HTTP API in this repository is a first-class product.
 ## Current baseline
 
 - public TikTok videos, photo galleries and music;
+- public SoundCloud tracks and playlists (fMP4/MP3/Opus HLS, native assembly);
+- provider auto-detection and mixed TikTok/SoundCloud batches;
+- SoundCloud playlist hydration and bounded-concurrency downloads;
 - full-page and embed resolvers;
 - ALPN Auto transport: HTTP/2 preferred, HTTP/1.1 fallback;
 - parallel WAF solver;
@@ -20,6 +23,7 @@ The authenticated HTTP API in this repository is a first-class product.
 - typed authenticated HTTP API with OpenAPI 3.1, in-memory media and response
   cache;
 - Cloudflare/Nginx TLS, HTTP/2, rate limiting and bounded request handling.
+- Telegram audio, inline audio, artwork and channel file-id reuse for SoundCloud.
 
 ## Completed internal refactors
 
@@ -34,11 +38,20 @@ The authenticated HTTP API in this repository is a first-class product.
 ## Completed API work
 
 - Bearer-only API with constant-time auth and per-client rate limiting.
-- Video, gallery and audio downloads with parallel in-memory ranges.
+- Video, gallery, audio, SoundCloud track and SoundCloud playlist downloads.
 - `/v1/resolve`, `/v1/download`, `/v1/batch`, `/v1/media/{token}`, `/v1/stats`.
 - 512-entry URL/options response cache; 768 MiB media store; 15-minute TTL.
-- OpenAPI 3.1 generated from Rust DTOs.
+- OpenAPI 3.1 generated from Rust DTOs, including SoundCloud entities and
+  playlist descriptors.
 - Nginx edge hardening + rate limiting; API and bot remain separate services.
+
+## Next: SoundCloud hardening
+
+1. Add bounded in-memory resolve caching for repeated SoundCloud links.
+2. Test progressive-MP3 and Opus-only tracks against real network samples.
+3. Optional per-playlist progress events and a webhook job stream.
+4. Revisit playlist concurrency against the 128 MiB bot cap with a bounded
+   prefetch/send pipeline.
 
 ## Next: internal maintainability
 

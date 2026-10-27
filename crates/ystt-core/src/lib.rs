@@ -16,6 +16,7 @@ pub mod model;
 pub mod parse;
 pub mod plan;
 pub mod progress;
+pub mod soundcloud;
 pub mod url;
 
 pub use cache::{UrlCache, signed_url_ttl};
@@ -28,11 +29,18 @@ pub use error::{ErrorInfo, PartialFailure, Result, YsttError};
 pub use file_cache::{CachedFile, FileCache, FileCacheEntry};
 pub use media::{DownloadedFile, sanitize_filename};
 pub use metadata::{CachedMetadata, MetadataCache, default_metadata_root, filter_session_cookie};
-pub use model::{Author, Bitrate, ImageInfo, MediaInfo, MediaKind, Music, TikTokItem, VideoInfo};
+pub use model::{
+    Author, Bitrate, ImageInfo, MediaInfo, MediaKind, Music, Provider, TikTokItem, VideoInfo,
+};
 pub use parse::{PageParse, extract_universal_json, parse_page};
 pub use plan::{ByteRange, RangePlan, RangePlanner};
 pub use progress::{
     MediaTarget, ProgressEvent, ProgressReporter, ProgressSink, ProgressStage, progress_channel,
+};
+pub use soundcloud::{
+    SoundCloudAudio, SoundCloudClient, SoundCloudEntity, SoundCloudPlaylist,
+    SoundCloudPlaylistAudio, SoundCloudTrack, SoundCloudTrackFailure, SoundCloudTranscoding,
+    is_soundcloud_url, normalize_url as normalize_soundcloud_url,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use url::{TikTokUrl, find_post_id_in_html, get_post_id};

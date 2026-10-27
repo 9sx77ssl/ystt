@@ -1,9 +1,12 @@
 # ystt — user guide
 
-`ystt` (**Yet Simple TikTok Toolkit**) downloads public TikTok videos and photo
-galleries. The Rust library is the primary product; the CLI is deliberately small.
+`ystt` (**Yet Simple TikTok Toolkit**) downloads public TikTok videos/galleries
+and public SoundCloud tracks/playlists. The Rust library is the primary product;
+the CLI, HTTP API and Telegram bot are thin consumers of it.
 
 ## Features
+
+### TikTok
 
 - public video posts, photo galleries and optional music;
 - official embed-page fallback for videos when the full page is blocked;
@@ -29,6 +32,20 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - bitrate/codec/dimension metadata and four quality policies;
 - typed errors, stage timings, offline tests and a local HTTP integration suite.
 
+### SoundCloud
+
+- public tracks and `/sets/` playlists;
+- dynamic public `client_id` discovery; no cookies, login, Go+ or browser
+  automation;
+- batched hydration of playlist stubs (large sets);
+- native AAC-fMP4/MP3/Opus HLS, progressive MP3 fallback, parallel segments,
+  `EXT-X-MAP` init assembly;
+- no `ffmpeg`, no `yt-dlp`, no account;
+- artwork, title, artist, duration, genre, policy and transcoding metadata;
+- typed rejection of `BLOCK`/`SNIP`/encrypted streams;
+- auto-detection and mixed TikTok/SoundCloud batches;
+- playlist downloads in CLI, API and Telegram.
+
 ## Constraints
 
 - ALPN Auto transport: HTTP/2 preferred, automatic HTTP/1.1 fallback for
@@ -37,6 +54,9 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - no proxies in v1;
 - no mobile API in v1;
 - no private/deleted/login-only posts;
+- no private/SoundCloud Go+ tracks; public tracks/playlists only;
+- no SoundCloud account cookies, login bypass or browser automation;
+- no `ffmpeg`/`yt-dlp`/external media post-processing;
 - no live streams;
 - HTTP/3 is not used by the core HTTP client (see `INTERNALS.md`); Cloudflare
   provides HTTP/3 to clients for the public API edge.
@@ -70,6 +90,8 @@ Advanced overrides: `YsttBuilder::transport(TransportPolicy::Http2Only)` or
 cargo build --release
 ./target/release/ystt "https://www.tiktok.com/@user/video/123" -o downloads
 ./target/release/ystt "https://www.tiktok.com/@user/photo/456" -o downloads
+./target/release/ystt "https://soundcloud.com/user/track" -o music
+./target/release/ystt "https://soundcloud.com/user/sets/playlist" -o music
 ```
 
 Metadata only:
@@ -105,8 +127,9 @@ Defaults:
 - `--urls-file` runs a batch from one URL per line (`#` comments and blank lines ignored; max 10,000 URLs / 8 MiB).
 - `--concurrency` controls batch concurrency (default 4, capped at 64); it requires `--urls-file`.
 - `--progress` writes one `ProgressEvent` JSON object per line to stderr.
-- `--filename` sets the filename base; placeholders: `{author}`, `{post_id}`,
-  `{quality}`. Path separators are sanitized.
+- `--filename` sets the filename base; placeholders: `{author}`, `{artist}`,
+  `{post_id}`, `{title}`, `{quality}`. Path separators are sanitized. SoundCloud
+  defaults to `{artist} - {title}`.
 - `--resume` continues a video from `.<name>.part` using a range request. It
   uses one resumable stream; adaptive range parallelism is skipped while enabled.
 
@@ -176,6 +199,35 @@ println!(
 `InMemoryPost`/`InMemoryFile` expose bytes, MIME, extension, dimensions, source
 URL and timings; they never imply an output directory.
 
+### SoundCloud library
+
+```rust
+use ystt::{DownloadOptions, SoundCloudEntity, Ystt};
+
+let ystt = Ystt::builder().file_cache(false).metadata_cache(false).build()?;
+let entity = ystt.resolve_soundcloud("https://soundcloud.com/user/track").await?;
+match entity {
+    SoundCloudEntity::Track(track) => {
+        let audio = ystt
+            .download_soundcloud_resolved_track(&track, &DownloadOptions::new())
+            .await?;
+        println!("{}: {} bytes {}", audio.track.title, audio.bytes.len(), audio.mime);
+    }
+    SoundCloudEntity::Playlist(playlist) => {
+        let result = ystt
+            .download_soundcloud_resolved_playlist(&playlist, &DownloadOptions::new(), 3)
+            .await?;
+        println!("{} tracks, {} failures", result.tracks.len(), result.failures.len());
+    }
+}
+```
+
+SoundCloud audio is selected by quality: `best`/`balanced` prefer `aac_160k`,
+`fast` prefers `aac_96k`, `compatible` prefers MP3. The output extension is
+`m4a`, `mp3` or `ogg`; MIME is returned alongside the bytes. Artwork is exposed
+as a URL for previews. `SoundCloudClient` is available through `Ystt::soundcloud()`
+for lower-level playlist hydration or custom orchestration.
+
 ## Configuration groups
 
 `YsttConfig` is grouped by responsibility:
@@ -209,6 +261,9 @@ the same typed options as the CLI.
 - Endpoints: `health`, `resolve`, `download`, `batch`, `media/{token}`, `stats`.
 - Media bytes live in a bounded RAM store; response descriptors contain a
   short-lived token and authenticated URL.
+- `/v1/resolve` and `/v1/download` auto-detect TikTok vs SoundCloud. SoundCloud
+  playlists return a `playlist` descriptor containing per-track audio tokens and
+  failures; the API caps a playlist at 200 tracks by default.
 - URL/options → response cache returns `cache_hit: true` without re-downloading
   while media tokens are live.
 - Request body cap is 64 KiB; server/download/batch/media limits are enforced.

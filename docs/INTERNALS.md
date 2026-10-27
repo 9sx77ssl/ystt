@@ -8,8 +8,10 @@ performance and decisions. The user-facing API is in `GUIDE.md`.
 ```text
 ystt-waf   (no ystt deps)   challenge parsing + parallel SHA-256 solver
 ystt-net   (no ystt deps)   wreq client, emulation, retries, rate limits
-ystt-core  (net + waf)      URL/model/parser/media/caches/progress/pipeline
+ystt-core  (net + waf)      provider model, URL/TikTok parser, SoundCloud
+  resolver/HLS, media/caches/progress/pipeline;
   download/{types,options,job,bytes,batch,builder};
+  soundcloud.rs;
   media/{transfer,validation,ext}. Transport, cache and cookie helpers are
   independent modules. The API depends only on the public core facade.
 ystt-cli   (core)           minimal clap front-end
@@ -82,6 +84,98 @@ hosts.
 
 `MediaInfo` exposes bitrates, codec, width, height and duration. `--info` prints
 all of them.
+
+## 2b. SoundCloud provider
+
+SoundCloud support is a second provider behind the same public `Ystt` facade. It
+does not share TikTok page/WAF logic and does not depend on yt-dlp, ffmpeg,
+browser automation, account cookies or Go+.
+
+### Public client identity
+
+The public web player exposes a short-lived `client_id` in its HTML/JS. The
+client:
+
+1. fetches `https://soundcloud.com/`;
+2. reads the `apiClient` hydration payload;
+3. falls back to public `a-v2.sndcdn.com` script bundles;
+4. caches the value in memory;
+5. invalidates it once on a 401/403 and retries.
+
+No hard-coded `client_id` is shipped. This is the same public identity a browser
+uses, not an account credential.
+
+### Resolution
+
+```text
+normalize https URL (allow only soundcloud.com / *.soundcloud.com)
+  └─ reject credentials and non-HTTPS
+follow on.soundcloud.com redirects manually (no cookies)
+GET api-v2.soundcloud.com/resolve?url=<encoded>&client_id=<id>
+  kind=track    -> metadata + transcodings
+  kind=playlist -> metadata + tracks[]
+                    ├─ full objects (first few)
+                    └─ ID-only stubs -> GET /tracks?ids=<batch>
+```
+
+Large sets return full objects for only the first few tracks. Stubs are hydrated
+in batches of 50 with bounded concurrency, then reinserted at their original
+indexes. This is why a 184-track playlist preserves order and gets real titles,
+durations and transcodings.
+
+`policy=BLOCK`, `policy=SNIP`, `policy=DENY` and empty/unsupported transcodings
+produce a typed unavailable error. `SNIP` is a preview/paid stream, not a public
+full track, so writing it would silently corrupt the user experience.
+
+### Transcoding selection
+
+| Policy | Preferred order |
+| --- | --- |
+| `best`, `balanced` | `aac_160k`, `mp3_1_0`, `aac_96k`, `mp3_0_1`, Opus |
+| `compatible` | `mp3_1_0`, `mp3_0_1`, `aac_160k`, `aac_96k`, Opus |
+| `fast` | `aac_96k`, `mp3_0_1`, Opus, then higher |
+
+The stream endpoint is called with `client_id` and the per-track
+`track_authorization`; it returns the final signed CDN URL. Signed playback URLs
+are never used as cache keys.
+
+### HLS assembly
+
+For `hls` transcodings the client fetches the media playlist and handles:
+
+- nested `#EXT-X-STREAM-INF` master playlists;
+- `#EXT-X-MAP:URI="init.mp4"` initialization segments;
+- relative URLs, query signatures and CDN redirects;
+- `#EXT-X-KEY`/`#EXT-X-SESSION-KEY` encryption -> typed refusal;
+- missing/empty segments -> typed parse error;
+- segment downloads with bounded concurrency, stored by index and concatenated
+  only after all parts arrive.
+
+AAC is fragmented MP4. `init` + ordered `.m4s` parts is a valid `.m4a` file
+(`ftyp`/`moov`/`moof`), which Telegram clients accept as audio. MP3 HLS and
+progressive MP3 are written as `.mp3`; Opus as `.ogg`. Output size is capped by
+the same `max_bytes` policy as TikTok. No external muxer is involved.
+
+### Playlists and API
+
+- Core returns `SoundCloudEntity::{Track,Playlist}` with typed metadata.
+- `download_soundcloud_playlist_with`/`download_soundcloud_resolved_playlist`
+  download in playlist order with bounded concurrency and per-track failures.
+- CLI writes playlist files concurrently and preserves track order.
+- The API returns a `playlist` descriptor; every track is a normal expiring
+  media token. `YSTT_API_MAX_PLAYLIST_TRACKS` caps a single set (default 200).
+- The bot keeps only playlist metadata while downloading/sending one track at a
+  time, so a large set cannot exhaust its 128 MiB process cap.
+
+### Security boundaries
+
+- HTTPS only; host allowlist for `soundcloud.com` and `*.soundcloud.com`.
+- No arbitrary URL fetch route; redirects from short links are re-validated.
+- No credential/cookie persistence.
+- HLS segment URLs come only from the signed public stream; encrypted playlists
+  are rejected.
+- Public API responses never expose `track_authorization` (skipped in serde),
+  although signed CDN URLs already appear in media descriptors as source URLs.
 
 ## 3. WAF challenge
 

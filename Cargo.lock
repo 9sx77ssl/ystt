@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "ystt"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "base64",
  "serde_json",
@@ -1946,7 +1946,7 @@ dependencies = [
 
 [[package]]
 name = "ystt-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1971,11 +1971,14 @@ dependencies = [
 
 [[package]]
 name = "ystt-cli"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "clap",
+ "futures-util",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1984,13 +1987,14 @@ dependencies = [
 
 [[package]]
 name = "ystt-core"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "blake3",
  "bytes",
  "futures-util",
  "http",
  "memchr",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -2006,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "ystt-net"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2021,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "ystt-waf"
-version = "1.11.0"
+version = "1.12.0"
 dependencies = [
  "base64",
  "itoa",

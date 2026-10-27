@@ -23,6 +23,10 @@ use crate::metadata::{MetadataCache, default_metadata_root};
 use crate::model::{MediaInfo, MediaKind, TikTokItem};
 use crate::parse::{PageParse, parse_embed_page, parse_page};
 use crate::progress::{MediaTarget, ProgressEmitter, ProgressStage, next_job_id};
+use crate::soundcloud::{
+    SoundCloudAudio, SoundCloudClient, SoundCloudEntity, SoundCloudPlaylistAudio,
+    SoundCloudTrackFailure,
+};
 use crate::url::{TikTokUrl, find_post_id_in_html};
 
 use self::job::DownloadJob;
@@ -47,6 +51,7 @@ pub struct Ystt {
     waf: WafSolver,
     cache: std::sync::Arc<UrlCache>,
     metadata: MetadataCache,
+    soundcloud: SoundCloudClient,
     waf_cookies: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
@@ -68,6 +73,11 @@ impl Ystt {
     /// Construct from a complete configuration.
     pub fn new(config: YsttConfig) -> Result<Self> {
         let http = HttpClient::new(config.network.http.clone())?;
+        let soundcloud = SoundCloudClient::new(
+            http.clone(),
+            config.network.max_page_bytes,
+            config.network.http.read_timeout,
+        );
         let waf = WafSolver::new(config.waf.clone());
         let cache = std::sync::Arc::new(UrlCache::new(config.cache.url_ttl));
         let metadata_root = config
@@ -83,6 +93,7 @@ impl Ystt {
             waf,
             cache,
             metadata,
+            soundcloud,
             waf_cookies: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -94,62 +105,216 @@ impl Ystt {
         &self.config
     }
 
-    /// Remove stale file-cache manifests and unreferenced objects.
-    pub async fn prune_file_cache(&self) -> Result<usize> {
-        FileCache::new(
-            self.file_cache_root(&self.config.output.dir),
-            self.config.cache.file_ttl,
-        )
-        .prune()
-        .await
+    /// Shared SoundCloud resolver/client.
+    pub fn soundcloud(&self) -> &SoundCloudClient {
+        &self.soundcloud
     }
 
-    /// Delete all file-cache manifests and objects.
-    pub async fn clear_file_cache(&self) -> Result<()> {
-        FileCache::new(
-            self.file_cache_root(&self.config.output.dir),
-            self.config.cache.file_ttl,
-        )
-        .clear()
-        .await
+    /// Resolve a public SoundCloud track or playlist.
+    pub async fn resolve_soundcloud(&self, url: &str) -> Result<SoundCloudEntity> {
+        self.soundcloud.resolve(url).await
     }
 
-    /// Clear the in-memory signed-URL cache.
-    pub async fn clear_url_cache(&self) {
-        self.cache.clear().await;
-    }
-
-    /// Clear the persistent metadata cache.
-    pub async fn clear_metadata_cache(&self) -> Result<()> {
-        self.metadata.clear().await
-    }
-
-    /// Remove expired or malformed metadata-cache entries.
-    pub async fn prune_metadata_cache(&self) -> Result<usize> {
-        self.metadata.prune().await
-    }
-
-    /// Invalidates one signed-URL cache entry in memory and on disk.
-    pub async fn invalidate_url_cache(&self, post_id: &str, quality: QualityPolicy) {
-        let key = format!("{post_id}:{}", quality.as_str());
-        self.cache.invalidate(&key).await;
-        let _ = self.metadata.invalidate(&key).await;
-    }
-
-    /// Invalidate one file-cache manifest. Unreferenced objects are removed by
-    /// the next [`Self::prune_file_cache`] call.
-    pub async fn invalidate_file_cache(
+    /// Resolve a public SoundCloud track or playlist with cancellation support.
+    pub async fn resolve_soundcloud_with(
         &self,
-        post_id: &str,
-        quality: QualityPolicy,
-        include_audio: bool,
-    ) -> Result<bool> {
-        FileCache::new(
-            self.file_cache_root(&self.config.output.dir),
-            self.config.cache.file_ttl,
-        )
-        .invalidate(&file_cache_key(post_id, quality, include_audio))
-        .await
+        url: &str,
+        options: &DownloadOptions,
+    ) -> Result<SoundCloudEntity> {
+        let opts = ResolvedOptions::resolve(&self.config, options);
+        self.soundcloud
+            .resolve_with_signal(url, opts.signal.as_ref())
+            .await
+    }
+
+    /// Download one public SoundCloud track into memory with default options.
+    pub async fn download_soundcloud_track(&self, url: &str) -> Result<SoundCloudAudio> {
+        self.download_soundcloud_track_with(url, DownloadOptions::default())
+            .await
+    }
+
+    /// Download one public SoundCloud track into memory.
+    pub async fn download_soundcloud_track_with(
+        &self,
+        url: &str,
+        options: DownloadOptions,
+    ) -> Result<SoundCloudAudio> {
+        let opts = ResolvedOptions::resolve(&self.config, &options);
+        let job_id = next_job_id();
+        let emitter = ProgressEmitter::single(opts.progress.clone(), job_id, url);
+        emitter.emit(ProgressStage::Resolving);
+        let result = async {
+            let entity = self
+                .soundcloud
+                .resolve_with_signal(url, opts.signal.as_ref())
+                .await?;
+            let track = match entity {
+                SoundCloudEntity::Track(track) => track,
+                SoundCloudEntity::Playlist(_) => {
+                    return Err(YsttError::UnsupportedUrl(
+                        "SoundCloud playlist URL; resolve the playlist and download its tracks"
+                            .into(),
+                    ));
+                }
+            };
+            emitter.emit(ProgressStage::Resolved {
+                post_id: track.id.clone(),
+                media_count: 1,
+            });
+            let audio = self
+                .soundcloud
+                .download_track(
+                    &track,
+                    opts.quality,
+                    opts.max_bytes,
+                    opts.max_connections,
+                    opts.media_retries,
+                    opts.signal.as_ref(),
+                )
+                .await?;
+            emitter.emit(ProgressStage::Completed { total_ms: 0 });
+            Ok(audio)
+        }
+        .await;
+        if let Err(error) = &result {
+            emitter.emit(ProgressStage::Failed {
+                error: error.info(),
+            });
+        }
+        result
+    }
+
+    /// Download one already-resolved SoundCloud track into memory.
+    pub async fn download_soundcloud_resolved_track(
+        &self,
+        track: &crate::soundcloud::SoundCloudTrack,
+        options: &DownloadOptions,
+    ) -> Result<SoundCloudAudio> {
+        let opts = ResolvedOptions::resolve(&self.config, options);
+        let job_id = next_job_id();
+        let emitter = ProgressEmitter::single(opts.progress.clone(), job_id, &track.permalink_url);
+        let result = self
+            .soundcloud
+            .download_track(
+                track,
+                opts.quality,
+                opts.max_bytes,
+                opts.max_connections,
+                opts.media_retries,
+                opts.signal.as_ref(),
+            )
+            .await;
+        if let Err(error) = &result {
+            emitter.emit(ProgressStage::Failed {
+                error: error.info(),
+            });
+        }
+        result
+    }
+
+    /// Download every track of a public SoundCloud playlist into memory.
+    ///
+    /// Tracks are returned in playlist order. A per-track failure is reported
+    /// when `allow_partial` is enabled; otherwise the first failure aborts the
+    /// playlist with [`YsttError::Partial`].
+    pub async fn download_soundcloud_playlist_with(
+        &self,
+        url: &str,
+        options: DownloadOptions,
+        concurrency: usize,
+    ) -> Result<SoundCloudPlaylistAudio> {
+        let entity = self.resolve_soundcloud_with(url, &options).await?;
+        let playlist = match entity {
+            SoundCloudEntity::Playlist(playlist) => playlist,
+            SoundCloudEntity::Track(_) => {
+                return Err(YsttError::UnsupportedUrl(
+                    "SoundCloud track URL; not a playlist".into(),
+                ));
+            }
+        };
+        self.download_soundcloud_resolved_playlist(&playlist, &options, concurrency)
+            .await
+    }
+
+    /// Download an already-resolved public SoundCloud playlist into memory.
+    pub async fn download_soundcloud_resolved_playlist(
+        &self,
+        playlist: &crate::soundcloud::SoundCloudPlaylist,
+        options: &DownloadOptions,
+        concurrency: usize,
+    ) -> Result<SoundCloudPlaylistAudio> {
+        let opts = ResolvedOptions::resolve(&self.config, options);
+        let concurrency = concurrency.clamp(1, 8);
+        let track_count = playlist.tracks.len();
+        let mut results: Vec<Option<Result<SoundCloudAudio>>> =
+            (0..track_count).map(|_| None).collect();
+        let mut failures = Vec::new();
+        let mut downloads = stream::iter(playlist.tracks.iter().cloned().enumerate().map(
+            |(index, track)| {
+                let client = self.soundcloud.clone();
+                let opts = opts.clone();
+                async move {
+                    let result = client
+                        .download_track(
+                            &track,
+                            opts.quality,
+                            opts.max_bytes,
+                            opts.max_connections.min(4),
+                            opts.media_retries,
+                            opts.signal.as_ref(),
+                        )
+                        .await;
+                    (index, track, result)
+                }
+            },
+        ))
+        .buffer_unordered(concurrency);
+        while let Some((index, track, result)) = downloads.next().await {
+            if let Err(error) = &result {
+                failures.push(SoundCloudTrackFailure {
+                    track_id: track.id.clone(),
+                    title: track.title.clone(),
+                    url: track.permalink_url.clone(),
+                    error: error.info(),
+                });
+            }
+            results[index] = Some(result);
+        }
+        drop(downloads);
+        if !opts.allow_partial && !failures.is_empty() {
+            return Err(YsttError::Partial(
+                failures
+                    .iter()
+                    .map(|failure| PartialFailure {
+                        kind: MediaKind::Audio,
+                        url: failure.url.clone(),
+                        error: failure.error.message.clone(),
+                    })
+                    .collect(),
+            ));
+        }
+        let tracks = results
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        if tracks.is_empty() {
+            return Err(YsttError::Partial(
+                failures
+                    .iter()
+                    .map(|failure| PartialFailure {
+                        kind: MediaKind::Audio,
+                        url: failure.url.clone(),
+                        error: failure.error.message.clone(),
+                    })
+                    .collect(),
+            ));
+        }
+        Ok(SoundCloudPlaylistAudio {
+            playlist: playlist.clone(),
+            tracks,
+            failures,
+        })
     }
 
     /// Resolve metadata without downloading media.

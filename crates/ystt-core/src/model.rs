@@ -6,6 +6,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::QualityPolicy;
 use crate::error::Result;
+/// Supported public media provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    /// TikTok public posts.
+    TikTok,
+    /// SoundCloud public tracks and playlists.
+    SoundCloud,
+}
+
+impl Provider {
+    /// Stable lowercase provider key for cache and API payloads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TikTok => "tiktok",
+            Self::SoundCloud => "soundcloud",
+        }
+    }
+}
+
 /// Kind of media file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

@@ -5,11 +5,12 @@ repository. Update it whenever architecture, deployment or safety rules change.
 
 ## Mission
 
-`ystt` is a typed, fast, resilient TikTok downloader for **public** posts. The
-workspace ships:
+`ystt` is a typed, fast, resilient TikTok **and SoundCloud** downloader for
+**public** content. The workspace ships:
 
 - `ystt` — public Rust facade;
-- `ystt-core` — resolver, parser, media pipeline, caches and progress;
+- `ystt-core` — provider-neutral model, TikTok resolver/parser, SoundCloud
+  resolver/client, media pipeline, caches and progress;
 - `ystt-net` — `wreq` HTTP client, browser emulation and host limits;
 - `ystt-waf` — challenge parser and parallel SHA-256 solver;
 - `ystt-cli` — small CLI;
@@ -22,6 +23,10 @@ the public `ystt` library.
 
 - Public content only. Never add account cookies, login-only posts, mobile
   private APIs, proxies or credential scraping.
+- SoundCloud is public-only: no Go+, account cookies, login bypass, browser
+  automation, `yt-dlp`, `ffmpeg` or any external media post-processor.
+- SoundCloud audio is assembled natively from public HLS/progressive streams;
+  reject encrypted HLS and `BLOCK`/`SNIP` policy tracks.
 - Keep the browser TLS/JA3/JA4 and HTTP/2 emulation intact unless a measured
   transport change is explicitly requested.
 - No CI/GitHub Actions, Redis/S3 or external hosted cache is required.
@@ -29,8 +34,9 @@ the public `ystt` library.
   those paths. The CLI file cache is intentionally CLI-only.
 - Never commit tokens, API keys, cookies, private keys or `.env` files.
 - Do not log authorization headers, API keys or full user media.
-- Keep public documentation in English. Preserve typed, modular, OOP-style
-  design and avoid duplicated download logic.
+- Keep public documentation in English. Preserve typed, modular, provider-aware
+  design and avoid duplicated download logic between TikTok, SoundCloud, CLI,
+  API and bot.
 - Every change must pass the verification checklist below.
 
 ## Workspace map
@@ -38,7 +44,7 @@ the public `ystt` library.
 ```text
 crates/ystt-waf/    challenge parsing + parallel solver
 crates/ystt-net/    wreq client, ALPN Auto, retries, host limits
-crates/ystt-core/   URL/model/parser/download pipeline/media/caches/progress
+crates/ystt-core/   provider model, TikTok + SoundCloud resolvers, download pipeline
 crates/ystt-cli/    clap front-end
 crates/ystt-api/    Axum API, DTOs, OpenAPI, Bearer auth, memory store
 deploy/             API service, nginx snippets, API env example
@@ -51,7 +57,9 @@ Important core modules:
 
 - `download/options.rs` — resolved config/override merge;
 - `download/job.rs` — disk download state machine;
-- `download/bytes.rs` — generic in-memory video/gallery/audio path;
+- `download/bytes.rs` — generic in-memory TikTok video/gallery/audio path;
+- `soundcloud.rs` — public `client_id`, resolve, playlist hydration, transcoding
+  selection, HLS segment parsing/assembly and native audio transfer;
 - `media/transfer.rs` — single stream, resume, adaptive ranges, in-memory
   ranges;
 - `api/src/downloader.rs` — API result cache and media descriptors;
@@ -86,8 +94,14 @@ The integration harness uses plain HTTP on loopback and therefore requires the
 - Disk downloads use adaptive range planning; large in-memory downloads use
   parallel HTTP ranges assembled in RAM.
 - API defaults: 128 MiB media cap, 3 workers, 2 batch concurrency, 8 MiB range
-  threshold, 6 range connections.
-- The Telegram bot uses `supports_streaming(true)` and real TikTok cover URLs.
+  threshold, 6 range connections, 200 SoundCloud playlist tracks.
+- SoundCloud `client_id` is discovered from the public web player and cached in
+  memory; never hard-code or commit a `client_id`.
+- SoundCloud playlists are hydrated in ID batches because the public API returns
+  stubs for most tracks in large sets.
+- The Telegram bot uses `supports_streaming(true)` and real TikTok cover URLs;
+  SoundCloud audio uses `sendAudio`/`InputMediaAudio` with title, performer and
+  artwork.
 - Never add throughput metrics to public/API responses unless explicitly
   requested; stage timings are allowed.
 
@@ -127,8 +141,10 @@ current `ystt` release:
 - `teloxide-fork 0.18.0` under the `teloxide` alias;
 - webhook mode only, loopback bind;
 - in-memory downloads only;
-- real cover + `supports_streaming(true)`;
-- channel mirror `-1004292297389` with reusable `file_id`;
+- real TikTok cover + `supports_streaming(true)`; SoundCloud square artwork,
+  title/performer and native audio;
+- channel mirror `-1004292297389` with reusable video/audio `file_id` caches;
+- mixed TikTok + SoundCloud input order, inline audio, playlist expansion;
 - local Bot API server on `127.0.0.1:8084`, `--local`, tmpfs work/temp;
 - channel, URL and media caches are bounded and in RAM;
 - no media files and no account cookies.
@@ -158,6 +174,7 @@ shared, but a new CLI flag or HTTP route is never assumed to appear by magic.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 - `cargo test --features integration-tests --test integration_pipeline`
+- `cargo test --test soundcloud_live -- --ignored` (real public network)
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` (known Cargo
   `ystt` lib/bin output collision warning is acceptable)
 - API: no key -> 401, valid key -> 200, invalid JSON -> 400, oversized body ->

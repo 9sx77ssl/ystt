@@ -44,6 +44,8 @@ pub struct ApiConfig {
     pub batch_concurrency: usize,
     /// Maximum URLs in one batch.
     pub max_batch: usize,
+    /// Maximum tracks accepted from one public SoundCloud playlist.
+    pub max_playlist_tracks: usize,
     /// Requests per minute per client.
     pub rate_per_min: u32,
     /// Token-bucket burst capacity.
@@ -62,6 +64,7 @@ impl fmt::Debug for ApiConfig {
             .field("workers", &self.workers)
             .field("batch_concurrency", &self.batch_concurrency)
             .field("max_batch", &self.max_batch)
+            .field("max_playlist_tracks", &self.max_playlist_tracks)
             .field("rate_per_min", &self.rate_per_min)
             .field("rate_burst", &self.rate_burst)
             .finish_non_exhaustive()
@@ -94,6 +97,7 @@ impl ApiConfig {
             workers: parse_or::<usize>("YSTT_API_WORKERS", "3")?.max(1),
             batch_concurrency: parse_or::<usize>("YSTT_API_BATCH_CONCURRENCY", "2")?.max(1),
             max_batch: parse_or::<usize>("YSTT_API_MAX_BATCH", "20")?.max(1),
+            max_playlist_tracks: parse_or::<usize>("YSTT_API_MAX_PLAYLIST_TRACKS", "200")?.max(1),
             rate_per_min: parse_or::<u32>("YSTT_API_RATE_PER_MIN", "120")?.max(1),
             rate_burst: parse_or::<u32>("YSTT_API_RATE_BURST", "30")?.max(1),
         })

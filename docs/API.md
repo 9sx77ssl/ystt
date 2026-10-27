@@ -1,7 +1,7 @@
 # ystt HTTP API
 
-`ystt-api` is a typed Axum service over the same in-memory pipeline used by the
-Telegram bot. It is both a binary and a library.
+`ystt-api` is a typed Axum service over the same in-memory TikTok + SoundCloud
+pipeline used by the Telegram bot. It is both a binary and a library.
 
 - Public base: `https://ystt.d9v.uk/api`
 - Local bind: `127.0.0.1:8091`
@@ -17,9 +17,9 @@ Telegram bot. It is both a binary and a library.
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/v1/health` | auth and liveness probe |
-| POST | `/v1/resolve` | resolve a URL, return `MediaInfo` only |
-| POST | `/v1/download` | download one post into memory |
-| POST | `/v1/batch` | ordered batch download |
+| POST | `/v1/resolve` | resolve a TikTok/SoundCloud URL (provider-tagged) |
+| POST | `/v1/download` | download one TikTok post or SoundCloud track/playlist |
+| POST | `/v1/batch` | ordered mixed-provider batch download |
 | GET/HEAD | `/v1/media/{token}` | stream media bytes, Range supported |
 | GET | `/v1/stats` | media-store statistics |
 | GET | `/v1/openapi.json` | generated OpenAPI document |
@@ -41,12 +41,15 @@ Telegram bot. It is both a binary and a library.
 }
 ```
 
-`max_bytes` cannot exceed the server cap. The response contains typed
-`MediaDescriptor` objects:
+`max_bytes` cannot exceed the server cap. TikTok and SoundCloud are auto-detected
+from the URL. The response contains typed `MediaDescriptor` objects:
 
 ```json
 {
+  "provider": "tiktok",
   "post_id": "123",
+  "title": null,
+  "artwork_url": null,
   "video": {
     "token": "…",
     "url": "https://ystt.d9v.uk/api/v1/media/…",
@@ -68,6 +71,56 @@ Telegram bot. It is both a binary and a library.
 }
 ```
 
+A SoundCloud track uses the same response with `provider: "soundcloud"`,
+`audio` set, and `title`/`artwork_url` populated:
+
+```json
+{
+  "provider": "soundcloud",
+  "post_id": "1407903748",
+  "title": "Track title",
+  "artwork_url": "https://i1.sndcdn.com/...-t300x300.jpg",
+  "author": { "id": "Artist", "nickname": "Artist" },
+  "audio": {
+    "token": "…",
+    "kind": "audio",
+    "mime": "audio/mp4",
+    "ext": "m4a",
+    "size": 4371992,
+    "title": "Track title",
+    "artist": "Artist",
+    "duration_sec": 216
+  },
+  "photos": [],
+  "playlist": null
+}
+```
+
+A SoundCloud `/sets/` URL returns a `playlist` descriptor with per-track
+`audio` descriptors, original order and per-track failures:
+
+```json
+{
+  "provider": "soundcloud",
+  "post_id": "2297180103",
+  "title": "Shh!",
+  "playlist": {
+    "playlist_id": "2297180103",
+    "title": "Shh!",
+    "artist": "Kai Angel & 9mice",
+    "track_count": 15,
+    "tracks": [
+      { "track_id": "…", "title": "…", "artist": "…", "audio": { "token": "…", "kind": "audio", "ext": "m4a" } }
+    ],
+    "failures": []
+  }
+}
+```
+
+For `/v1/resolve`, the top-level object has `provider` and exactly one of:
+- flattened TikTok `MediaInfo` fields (existing compatibility), or
+- `soundcloud: { type: "track" | "playlist", data: … }`.
+
 Fetch the bytes with the same Bearer key:
 
 ```bash
@@ -82,7 +135,8 @@ curl -H "Authorization: Bearer $YSTT_API_KEY" \
 {
   "urls": [
     "https://www.tiktok.com/@a/video/1",
-    "https://www.tiktok.com/@b/video/2"
+    "https://soundcloud.com/a/track",
+    "https://soundcloud.com/b/sets/playlist"
   ],
   "concurrency": 2,
   "include_audio": false
@@ -90,6 +144,8 @@ curl -H "Authorization: Bearer $YSTT_API_KEY" \
 ```
 
 Items are returned in input order. Individual failures do not abort other items.
+Each item is provider-tagged. A playlist item expands to its tracks inside that
+one item; it does not change the batch item count.
 
 ## Errors
 
@@ -114,10 +170,13 @@ Stable error codes include `unauthorized`, `rate_limited`, `invalid_url`,
 - Rate limit: 120 requests/minute per client, burst 30.
 - Download workers: 3; batch concurrency: 2.
 - Per-media cap: 128 MiB.
-- In-memory media store: 768 MiB, TTL 900 seconds.
+- In-memory media store: 768 MiB, TTL 900 seconds (raise it if routinely serving
+  100+ track playlists; a 184-track playlist measured ~680 MiB).
+- SoundCloud playlist cap: 200 tracks per request.
 - Media tokens are 128-bit random values and are evicted by TTL/size.
-- A bounded URL/options -> response cache (512 entries) returns `cache_hit: true`
-  and skips TikTok entirely while all referenced media tokens are still live.
+- A bounded provider-aware URL/options -> response cache (512 entries) returns
+  `cache_hit: true` and skips the network entirely while all referenced media
+  tokens are still live.
 - Range requests are supported by `/v1/media/{token}`.
 
 ## Configuration
@@ -133,6 +192,7 @@ Stable error codes include `unauthorized`, `rate_limited`, `invalid_url`,
 | `YSTT_API_WORKERS` | `3` | concurrent downloads |
 | `YSTT_API_BATCH_CONCURRENCY` | `2` | batch parallelism |
 | `YSTT_API_MAX_BATCH` | `20` | max batch URLs |
+| `YSTT_API_MAX_PLAYLIST_TRACKS` | `200` | max tracks in one SoundCloud playlist |
 | `YSTT_API_RATE_PER_MIN` | `120` | per-client rate |
 | `YSTT_API_RATE_BURST` | `30` | token-bucket burst |
 

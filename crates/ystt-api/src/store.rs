@@ -148,4 +148,23 @@ mod tests {
         assert!(store.get(&first).is_none());
         assert!(store.get(&second).is_some());
     }
+
+    #[test]
+    fn concurrent_inserts_and_gets_are_safe() {
+        let store = MediaStore::new(Duration::from_secs(60), 1024 * 1024);
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let token = store.insert(media(64));
+                    assert!(store.get(&token).is_some());
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert!(store.stats().entries > 0);
+    }
 }

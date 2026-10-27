@@ -22,6 +22,7 @@ fn state() -> AppState {
         workers: 2,
         batch_concurrency: 1,
         max_batch: 4,
+        max_playlist_tracks: 16,
         rate_per_min: 600,
         rate_burst: 100,
     })
@@ -71,6 +72,9 @@ async fn openapi_contains_bearer_security() {
         "bearer"
     );
     assert!(value["paths"]["/v1/download"].is_object());
+    assert!(value["components"]["schemas"]["SoundCloudEntity"].is_object());
+    assert!(value["components"]["schemas"]["PlaylistDescriptor"].is_object());
+    assert!(value["components"]["schemas"]["Provider"].is_object());
 }
 
 #[tokio::test]

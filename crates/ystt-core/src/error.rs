@@ -46,8 +46,8 @@ pub enum YsttError {
     #[error("not a TikTok URL: {0}")]
     UnsupportedUrl(String),
 
-    /// TikTok says the post is gone, private or unavailable.
-    #[error("TikTok post is unavailable: {0}")]
+    /// The provider says the post/track is gone, private or unavailable.
+    #[error("media is unavailable: {0}")]
     Unavailable(String),
 
     /// TikTok marks the post as age-restricted and exposes no media URL.

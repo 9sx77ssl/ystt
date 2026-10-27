@@ -2,7 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use ystt::{Author, DownloadOptions, MediaInfo, MediaKind, PartialFailure, QualityPolicy, Timings};
+use ystt::{
+    Author, DownloadOptions, MediaInfo, MediaKind, PartialFailure, Provider, QualityPolicy,
+    SoundCloudEntity, Timings,
+};
 
 use crate::config::ApiConfig;
 use crate::error::{ApiError, ErrorBody};
@@ -129,31 +132,98 @@ pub struct MediaDescriptor {
     pub width: Option<u32>,
     /// Height for video/photo media.
     pub height: Option<u32>,
-    /// Duration for video media.
+    /// Duration for video/audio media.
     pub duration_sec: Option<u32>,
+    /// Track title for audio media.
+    pub title: Option<String>,
+    /// Artist/performer for audio media.
+    pub artist: Option<String>,
+}
+
+/// One track inside a SoundCloud playlist response.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PlaylistTrackDescriptor {
+    /// SoundCloud track ID.
+    pub track_id: String,
+    /// Track title.
+    pub title: String,
+    /// Artist/performer.
+    pub artist: String,
+    /// Canonical track page.
+    pub page_url: String,
+    /// Square artwork URL.
+    pub artwork_url: Option<String>,
+    /// Duration in seconds.
+    pub duration_sec: Option<u32>,
+    /// Audio descriptor.
+    pub audio: MediaDescriptor,
+}
+
+/// SoundCloud playlist result.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PlaylistDescriptor {
+    /// Playlist ID.
+    pub playlist_id: String,
+    /// Playlist title.
+    pub title: String,
+    /// Playlist curator.
+    pub artist: String,
+    /// Canonical playlist page.
+    pub page_url: String,
+    /// Square artwork URL.
+    pub artwork_url: Option<String>,
+    /// Number of tracks in the playlist.
+    pub track_count: usize,
+    /// Downloaded tracks in playlist order.
+    pub tracks: Vec<PlaylistTrackDescriptor>,
+    /// Tracks that failed under partial mode.
+    pub failures: Vec<PlaylistFailure>,
+}
+
+/// One failed playlist track in an API response.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PlaylistFailure {
+    /// Track ID.
+    pub track_id: String,
+    /// Track title.
+    pub title: String,
+    /// Canonical track page.
+    pub url: String,
+    /// Stable machine-readable error code.
+    pub code: String,
+    /// Human-readable error message.
+    pub message: String,
 }
 
 /// Full result of an in-memory download.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DownloadResponse {
-    /// Post ID.
+    /// Source provider.
+    pub provider: Provider,
+    /// Post or track ID.
     pub post_id: String,
     /// Original input URL.
     pub source_url: String,
-    /// Canonical TikTok page URL.
+    /// Canonical page URL.
     pub page_url: String,
-    /// Author.
+    /// Author/performer.
     pub author: Author,
-    /// Caption.
+    /// Caption/description.
     pub description: Option<String>,
-    /// Cover image URL.
+    /// Cover/artwork URL.
     pub cover_url: Option<String>,
+    /// Media title (SoundCloud track/playlist title).
+    pub title: Option<String>,
+    /// Square artwork URL (SoundCloud).
+    pub artwork_url: Option<String>,
     /// Video when present.
     pub video: Option<MediaDescriptor>,
     /// Gallery photos in order.
     pub photos: Vec<MediaDescriptor>,
-    /// Music when requested.
+    /// Music/audio when present.
     pub audio: Option<MediaDescriptor>,
+    /// SoundCloud playlist when the input was a set.
+    pub playlist: Option<PlaylistDescriptor>,
     /// Partial failures.
     pub failures: Vec<PartialFailure>,
     /// Stage timings.
@@ -191,9 +261,14 @@ pub struct BatchResponse {
 /// Resolve response.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ResolveResponse {
-    /// Resolved media metadata.
-    #[serde(flatten)]
-    pub info: MediaInfo,
+    /// Detected source provider.
+    pub provider: Provider,
+    /// TikTok metadata when `provider` is `tiktok`.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub info: Option<MediaInfo>,
+    /// SoundCloud track/playlist metadata when `provider` is `soundcloud`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soundcloud: Option<SoundCloudEntity>,
 }
 
 /// Liveness/readiness response.

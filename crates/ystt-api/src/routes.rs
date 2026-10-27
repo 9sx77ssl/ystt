@@ -54,11 +54,11 @@ pub async fn resolve(
     State(state): State<AppState>,
     Json(request): Json<ResolveRequest>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
-    let info = state
+    let response = state
         .downloader
         .resolve(&request.url, &request.options)
         .await?;
-    Ok(Json(ResolveResponse { info }))
+    Ok(Json(response))
 }
 
 #[utoipa::path(

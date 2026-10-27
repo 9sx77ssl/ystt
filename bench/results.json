@@ -1,0 +1,32 @@
+{
+  "track": {
+    "rust_median_sec": 1.608,
+    "bun_median_sec": 1.639,
+    "rust_runs_sec": [
+      1.162,
+      1.561,
+      1.68,
+      1.527,
+      1.638,
+      1.679,
+      1.608
+    ],
+    "bun_runs_sec": [
+      1.657,
+      1.639,
+      1.619,
+      1.59,
+      1.716,
+      1.692,
+      1.595
+    ],
+    "bytes": 4371992,
+    "same_sha256": true,
+    "sha256": "a489fb2879bcd0b2d69915e93be89478f354d5ba1d84cf9bd63929cd18691f1c"
+  },
+  "playlist_15": {
+    "rust_median_sec": 5.024
+  },
+  "child_max_rss_mib": 45.0,
+  "note": "Single-run peak RSS is dominated by the largest child; run memory via /usr/bin/time or the API for separate figures."
+}

@@ -7,11 +7,16 @@ use std::time::{Duration, Instant};
 use futures_util::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
-use ystt::{Http2Tuning, InMemoryFile, InMemoryPost, MediaInfo, QualityPolicy, Ystt};
+use ystt::{
+    Author, DownloadOptions, Http2Tuning, InMemoryFile, InMemoryPost, MediaKind, Provider,
+    QualityPolicy, SoundCloudAudio, SoundCloudEntity, Timings, Ystt, is_soundcloud_url,
+    normalize_soundcloud_url,
+};
 
 use crate::config::ApiConfig;
 use crate::dto::{
     BatchItem, BatchResponse, DownloadOptionsInput, DownloadResponse, MediaDescriptor,
+    PlaylistDescriptor, PlaylistFailure, PlaylistTrackDescriptor, ResolveResponse,
 };
 use crate::error::ApiError;
 use crate::store::{MediaStore, StoredMedia};
@@ -83,12 +88,30 @@ impl Downloader {
         &self,
         url: &str,
         input: &DownloadOptionsInput,
-    ) -> Result<MediaInfo, ApiError> {
+    ) -> Result<ResolveResponse, ApiError> {
         let options = input.to_options(&self.config)?;
-        self.ystt
+        if is_soundcloud_url(url) {
+            let entity = self
+                .ystt
+                .resolve_soundcloud_with(url, &options)
+                .await
+                .map_err(ApiError::from)?;
+            return Ok(ResolveResponse {
+                provider: Provider::SoundCloud,
+                info: None,
+                soundcloud: Some(entity),
+            });
+        }
+        let info = self
+            .ystt
             .resolve_with(url, &options)
             .await
-            .map_err(ApiError::from)
+            .map_err(ApiError::from)?;
+        Ok(ResolveResponse {
+            provider: Provider::TikTok,
+            info: Some(info),
+            soundcloud: None,
+        })
     }
 
     /// Download one post into memory and return authenticated descriptors.
@@ -109,14 +132,186 @@ impl Downloader {
             )
         })?;
         let options = input.to_options(&self.config)?;
-        let post = self
-            .ystt
-            .download_bytes_with(url, options)
-            .await
-            .map_err(ApiError::from)?;
-        let response = self.response(post)?;
+        let response = if is_soundcloud_url(url) {
+            self.download_soundcloud(url, options).await?
+        } else {
+            let post = self
+                .ystt
+                .download_bytes_with(url, options)
+                .await
+                .map_err(ApiError::from)?;
+            self.response(post)?
+        };
         self.cache(key, response.clone());
         Ok(response)
+    }
+
+    async fn download_soundcloud(
+        &self,
+        url: &str,
+        options: DownloadOptions,
+    ) -> Result<DownloadResponse, ApiError> {
+        let started = Instant::now();
+        let entity = self
+            .ystt
+            .resolve_soundcloud_with(url, &options)
+            .await
+            .map_err(ApiError::from)?;
+        match entity {
+            SoundCloudEntity::Track(track) => {
+                let audio = self
+                    .ystt
+                    .download_soundcloud_resolved_track(&track, &options)
+                    .await
+                    .map_err(ApiError::from)?;
+                let descriptor = self.describe_audio(&audio);
+                let artwork = audio.artwork_url().to_owned();
+                Ok(DownloadResponse {
+                    provider: Provider::SoundCloud,
+                    post_id: track.id.clone(),
+                    source_url: url.to_owned(),
+                    page_url: track.permalink_url.clone(),
+                    author: Author {
+                        id: if track.artist.is_empty() {
+                            track.id.clone()
+                        } else {
+                            track.artist.clone()
+                        },
+                        nickname: Some(track.artist.clone()),
+                    },
+                    description: track.description.clone(),
+                    cover_url: Some(artwork.clone()),
+                    title: Some(track.title.clone()),
+                    artwork_url: Some(artwork),
+                    video: None,
+                    photos: Vec::new(),
+                    audio: Some(descriptor),
+                    playlist: None,
+                    failures: Vec::new(),
+                    timings: Timings {
+                        total_ms: started.elapsed().as_millis() as u64,
+                        media_ms: started.elapsed().as_millis() as u64,
+                        ..Timings::default()
+                    },
+                    cache_hit: false,
+                })
+            }
+            SoundCloudEntity::Playlist(playlist) => {
+                if playlist.tracks.len() > self.config.max_playlist_tracks {
+                    return Err(ApiError::new(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "playlist_too_large",
+                        format!(
+                            "playlist has {} tracks; API limit is {}",
+                            playlist.tracks.len(),
+                            self.config.max_playlist_tracks
+                        ),
+                    ));
+                }
+                let total_tracks = playlist.tracks.len();
+                let downloaded = self
+                    .ystt
+                    .download_soundcloud_resolved_playlist(
+                        &playlist,
+                        &options,
+                        (self.config.batch_concurrency * 2).clamp(1, 4),
+                    )
+                    .await
+                    .map_err(ApiError::from)?;
+                let tracks: Vec<PlaylistTrackDescriptor> = downloaded
+                    .tracks
+                    .iter()
+                    .map(|audio| PlaylistTrackDescriptor {
+                        track_id: audio.track.id.clone(),
+                        title: audio.track.title.clone(),
+                        artist: audio.track.artist.clone(),
+                        page_url: audio.track.permalink_url.clone(),
+                        artwork_url: audio.track.artwork_url.clone(),
+                        duration_sec: audio.duration_sec(),
+                        audio: self.describe_audio(audio),
+                    })
+                    .collect();
+                let failures: Vec<PlaylistFailure> = downloaded
+                    .failures
+                    .iter()
+                    .map(|failure| PlaylistFailure {
+                        track_id: failure.track_id.clone(),
+                        title: failure.title.clone(),
+                        url: failure.url.clone(),
+                        code: failure.error.code.to_owned(),
+                        message: failure.error.message.clone(),
+                    })
+                    .collect();
+                let artwork = downloaded.playlist.artwork().to_owned();
+                Ok(DownloadResponse {
+                    provider: Provider::SoundCloud,
+                    post_id: downloaded.playlist.id.clone(),
+                    source_url: url.to_owned(),
+                    page_url: downloaded.playlist.permalink_url.clone(),
+                    author: Author {
+                        id: if downloaded.playlist.artist.is_empty() {
+                            downloaded.playlist.id.clone()
+                        } else {
+                            downloaded.playlist.artist.clone()
+                        },
+                        nickname: Some(downloaded.playlist.artist.clone()),
+                    },
+                    description: downloaded.playlist.description.clone(),
+                    cover_url: Some(artwork.clone()),
+                    title: Some(downloaded.playlist.title.clone()),
+                    artwork_url: Some(artwork),
+                    video: None,
+                    photos: Vec::new(),
+                    audio: None,
+                    playlist: Some(PlaylistDescriptor {
+                        playlist_id: downloaded.playlist.id,
+                        title: downloaded.playlist.title,
+                        artist: downloaded.playlist.artist,
+                        page_url: downloaded.playlist.permalink_url,
+                        artwork_url: downloaded.playlist.artwork_url,
+                        track_count: total_tracks,
+                        tracks,
+                        failures,
+                    }),
+                    failures: Vec::new(),
+                    timings: Timings {
+                        total_ms: started.elapsed().as_millis() as u64,
+                        media_ms: started.elapsed().as_millis() as u64,
+                        ..Timings::default()
+                    },
+                    cache_hit: false,
+                })
+            }
+        }
+    }
+
+    fn describe_audio(&self, audio: &SoundCloudAudio) -> MediaDescriptor {
+        let sha256 = sha256_hex(&audio.bytes);
+        let token = self.store.insert(StoredMedia {
+            bytes: audio.bytes.clone(),
+            mime: audio.mime.clone(),
+            ext: audio.ext.clone(),
+            kind: MediaKind::Audio,
+            sha256: sha256.clone(),
+            source_url: audio.source_url.clone(),
+            created: Instant::now(),
+            expires: Instant::now(),
+        });
+        MediaDescriptor {
+            url: self.config.media_url(&token),
+            token,
+            kind: MediaKind::Audio,
+            mime: audio.mime.clone(),
+            ext: audio.ext.clone(),
+            size: audio.bytes.len() as u64,
+            sha256,
+            source_url: audio.source_url.clone(),
+            width: None,
+            height: None,
+            duration_sec: audio.duration_sec(),
+            title: Some(audio.track.title.clone()),
+            artist: Some(audio.track.artist.clone()),
+        }
     }
 
     fn cached(&self, key: &str) -> Option<DownloadResponse> {
@@ -236,15 +431,19 @@ impl Downloader {
             return Err(ApiError::from(ystt::YsttError::NoMedia));
         }
         Ok(DownloadResponse {
+            provider: Provider::TikTok,
             post_id: post.post_id,
             source_url: post.source_url,
             page_url: post.page_url,
             author: post.author,
             description: post.description,
-            cover_url: post.cover_url,
+            cover_url: post.cover_url.clone(),
+            title: None,
+            artwork_url: None,
             video,
             photos,
             audio,
+            playlist: None,
             failures: post.failures,
             timings: post.timings,
             cache_hit: false,
@@ -275,15 +474,24 @@ impl Downloader {
             width: file.width,
             height: file.height,
             duration_sec: file.duration_sec,
+            title: None,
+            artist: None,
         }
     }
 }
 
 fn cache_key(url: &str, input: &DownloadOptionsInput) -> String {
-    let normalized = ystt::TikTokUrl::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.post_id().map(|id| format!("post:{id}")))
-        .unwrap_or_else(|| url.trim().to_owned());
+    let normalized = if is_soundcloud_url(url) {
+        normalize_soundcloud_url(url)
+            .map(|url| format!("soundcloud:{url}"))
+            .unwrap_or_else(|_| format!("soundcloud:{}", url.trim()))
+    } else {
+        let key = ystt::TikTokUrl::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.post_id().map(|id| format!("post:{id}")))
+            .unwrap_or_else(|| url.trim().to_owned());
+        format!("tiktok:{key}")
+    };
     format!("{normalized}|{input:?}")
 }
 
@@ -293,6 +501,12 @@ fn response_is_live(response: &DownloadResponse, store: &MediaStore) -> bool {
         .iter()
         .chain(response.photos.iter())
         .chain(response.audio.iter())
+        .chain(
+            response
+                .playlist
+                .iter()
+                .flat_map(|playlist| playlist.tracks.iter().map(|track| &track.audio)),
+        )
         .all(|descriptor| store.get(&descriptor.token).is_some())
 }
 
@@ -309,6 +523,22 @@ mod tests {
         assert_eq!(
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn cache_keys_are_provider_namespaced_and_share_query_is_ignored() {
+        let input = DownloadOptionsInput::default();
+        let track = cache_key("https://soundcloud.com/u/t?si=x&utm_source=y", &input);
+        let again = cache_key("https://soundcloud.com/u/t", &input);
+        assert_eq!(track, again);
+        assert!(track.starts_with("soundcloud:https://soundcloud.com/u/t"));
+        assert!(
+            cache_key(
+                "https://www.tiktok.com/@u/video/7687283866586909984?x=1",
+                &input
+            )
+            .starts_with("tiktok:post:7687283866586909984")
         );
     }
 }

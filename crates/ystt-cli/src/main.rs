@@ -7,25 +7,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
+use futures_util::{StreamExt, stream};
+use sha2::{Digest, Sha256};
 use tracing_subscriber::EnvFilter;
 use ystt_core::{
     BatchOptions, BatchResult, DownloadOptions, DownloadResult, ProgressEvent, ProgressReporter,
-    QualityPolicy, Ystt, YsttError,
+    QualityPolicy, SoundCloudAudio, SoundCloudEntity, SoundCloudPlaylist, Ystt, YsttError,
+    is_soundcloud_url, normalize_soundcloud_url, sanitize_filename,
 };
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(
     name = "ystt",
     version,
-    about = "Fast TikTok video and photo-gallery downloader",
-    long_about = "Download a public TikTok video or every photo of a gallery. No account cookies, no proxies, no mobile API."
+    about = "Fast TikTok + SoundCloud downloader",
+    long_about = "Download public TikTok videos/galleries/music and public SoundCloud tracks/playlists. No account cookies, no proxies, no mobile API, no ffmpeg."
 )]
 struct Cli {
-    /// TikTok URL.
+    /// TikTok or SoundCloud URL.
     #[arg(required_unless_present = "urls_file")]
     url: Option<String>,
 
-    /// File with one TikTok URL per line (batch mode).
+    /// File with one TikTok/SoundCloud URL per line (batch mode).
     #[arg(long, value_name = "FILE", conflicts_with_all = ["url", "info"])]
     urls_file: Option<PathBuf>,
 
@@ -54,15 +57,15 @@ struct Cli {
     #[arg(long)]
     progress: bool,
 
-    /// Video quality policy.
+    /// Media quality policy (TikTok video / SoundCloud audio).
     #[arg(long, value_enum, default_value_t = QualityArg::Balanced)]
     quality: QualityArg,
 
-    /// Output filename template: {author}, {post_id}, {quality}.
+    /// Output filename template: {author}/{artist}, {post_id}, {title}, {quality}.
     #[arg(long, value_name = "TEMPLATE")]
     filename: Option<String>,
 
-    /// Download the post's music track too.
+    /// Download the post's music track too (TikTok; SoundCloud is audio-only).
     #[arg(long)]
     audio: bool,
 
@@ -136,6 +139,7 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
     let reporter = cli_reporter(cli.progress);
     let mut options = DownloadOptions::new()
         .output_dir(&cli.output)
+        .quality(cli.quality.into())
         .resume(cli.resume)
         .file_cache(!cli.no_cache)
         .metadata_cache(!cli.no_cache);
@@ -148,6 +152,10 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
 
     if let Some(path) = &cli.urls_file {
         let urls = read_urls_file(path)?;
+        if urls.iter().any(|url| is_soundcloud_url(url)) {
+            run_mixed_batch(&ystt, &cli, urls, options, reporter).await?;
+            return Ok(());
+        }
         let mut batch_options = BatchOptions::new()
             .output_dir(&cli.output)
             .quality(cli.quality.into())
@@ -175,6 +183,24 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
         .url
         .as_deref()
         .ok_or_else(|| YsttError::InvalidUrl("missing URL".into()))?;
+    if is_soundcloud_url(url) {
+        if cli.info {
+            let entity = ystt.resolve_soundcloud_with(url, &options).await?;
+            if cli.json {
+                print_json(&entity)?;
+            } else {
+                print_soundcloud_info(&entity);
+            }
+            return Ok(());
+        }
+        let value = download_soundcloud_url(&ystt, &cli, url, options).await?;
+        if cli.json {
+            print_json(&value)?;
+        } else {
+            print_soundcloud_value(&value);
+        }
+        return Ok(());
+    }
     if cli.info {
         let info = ystt.resolve_with(url, &options).await?;
         if cli.json {
@@ -192,6 +218,384 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
         print_human(&result);
     }
     Ok(())
+}
+
+async fn run_mixed_batch(
+    ystt: &Ystt,
+    cli: &Cli,
+    urls: Vec<String>,
+    options: DownloadOptions,
+    reporter: Option<ProgressReporter>,
+) -> Result<(), YsttError> {
+    let concurrency = cli.concurrency.clamp(1, 64);
+    let total = urls.len();
+    let mut results: Vec<Option<Result<serde_json::Value, YsttError>>> =
+        (0..total).map(|_| None).collect();
+    let mut downloads = stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
+        let ystt = ystt.clone();
+        let cli = cli.clone();
+        let mut item_options = options.clone();
+        item_options.progress = None;
+        async move {
+            let result = if is_soundcloud_url(&url) {
+                download_soundcloud_url(&ystt, &cli, &url, item_options).await
+            } else {
+                ystt.download_with(&url, item_options)
+                    .await
+                    .and_then(|result| {
+                        serde_json::to_value(&result)
+                            .map_err(|error| YsttError::Parse(error.to_string()))
+                    })
+                    .map(|mut value| {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("provider".into(), serde_json::json!("tiktok"));
+                        }
+                        value
+                    })
+            };
+            (index, url, result)
+        }
+    }))
+    .buffer_unordered(concurrency);
+    while let Some((index, url, result)) = downloads.next().await {
+        results[index] = Some(match result {
+            Ok(value) => Ok(value),
+            Err(error) => Err(match error {
+                YsttError::Parse(_) => error,
+                other => {
+                    eprintln!("error: {url} {other}");
+                    other
+                }
+            }),
+        });
+    }
+    drop(downloads);
+
+    let mut successes = 0usize;
+    let mut failures = 0usize;
+    let mut values = Vec::with_capacity(total);
+    for result in results.into_iter().flatten() {
+        match result {
+            Ok(value) => {
+                successes += 1;
+                if !cli.json {
+                    print_soundcloud_value(&value);
+                }
+                values.push(value);
+            }
+            Err(error) => {
+                failures += 1;
+                if cli.json {
+                    values.push(serde_json::json!({
+                        "provider": "error",
+                        "error": error.info(),
+                    }));
+                }
+            }
+        }
+    }
+    if let Some(reporter) = reporter {
+        let _ = reporter;
+    }
+    if cli.json {
+        print_json(&values)?;
+    } else {
+        println!("batch: ok {successes} | failed {failures}");
+    }
+    Ok(())
+}
+
+async fn download_soundcloud_url(
+    ystt: &Ystt,
+    cli: &Cli,
+    url: &str,
+    options: DownloadOptions,
+) -> Result<serde_json::Value, YsttError> {
+    let canonical = normalize_soundcloud_url(url)?;
+    let entity = ystt.resolve_soundcloud_with(&canonical, &options).await?;
+    match entity {
+        SoundCloudEntity::Track(track) => {
+            let audio = ystt
+                .download_soundcloud_resolved_track(&track, &options)
+                .await?;
+            let path = write_soundcloud_audio(
+                &cli.output,
+                cli.filename.as_deref(),
+                cli.quality.into(),
+                &audio,
+            )?;
+            Ok(soundcloud_track_value(&audio, &path))
+        }
+        SoundCloudEntity::Playlist(playlist) => {
+            let track_count = playlist.tracks.len();
+            let mut results: Vec<Option<Result<serde_json::Value, YsttError>>> =
+                (0..track_count).map(|_| None).collect();
+            let concurrency = cli.concurrency.clamp(1, 8);
+            let output_dir = cli.output.clone();
+            let template = cli.filename.clone();
+            let quality = cli.quality.into();
+            let mut downloads = stream::iter(playlist.tracks.iter().cloned().enumerate().map(
+                |(index, track)| {
+                    let ystt = ystt.clone();
+                    let options = options.clone();
+                    let output_dir = output_dir.clone();
+                    let template = template.clone();
+                    async move {
+                        let result = ystt
+                            .download_soundcloud_resolved_track(&track, &options)
+                            .await
+                            .and_then(|audio| {
+                                let path = write_soundcloud_audio(
+                                    &output_dir,
+                                    template.as_deref(),
+                                    quality,
+                                    &audio,
+                                )?;
+                                Ok(soundcloud_track_value(&audio, &path))
+                            });
+                        (index, result)
+                    }
+                },
+            ))
+            .buffer_unordered(concurrency);
+            while let Some((index, result)) = downloads.next().await {
+                results[index] = Some(result);
+            }
+            drop(downloads);
+            let mut tracks = Vec::with_capacity(track_count);
+            for result in results.into_iter().flatten() {
+                tracks.push(result?);
+            }
+            Ok(serde_json::json!({
+                "provider": "soundcloud",
+                "type": "playlist",
+                "id": playlist.id,
+                "title": playlist.title,
+                "artist": playlist.artist,
+                "page_url": playlist.permalink_url,
+                "artwork_url": playlist.artwork(),
+                "track_count": track_count,
+                "tracks": tracks,
+            }))
+        }
+    }
+}
+
+fn write_soundcloud_audio(
+    output_dir: &std::path::Path,
+    template: Option<&str>,
+    quality: QualityPolicy,
+    audio: &SoundCloudAudio,
+) -> Result<PathBuf, YsttError> {
+    std::fs::create_dir_all(output_dir)?;
+    let template = template.unwrap_or("{artist} - {title}");
+    let mut name = template
+        .replace("{author}", &audio.track.artist)
+        .replace("{artist}", &audio.track.artist)
+        .replace("{post_id}", &audio.track.id)
+        .replace("{title}", &audio.track.title)
+        .replace("{quality}", quality.as_str());
+    name = sanitize_filename(&name);
+    if name.is_empty() {
+        name = format!("soundcloud_{}", audio.track.id);
+    }
+    let path = output_dir.join(format!("{name}.{}", audio.ext));
+    std::fs::write(&path, &audio.bytes)?;
+    Ok(path)
+}
+
+fn soundcloud_track_value(audio: &SoundCloudAudio, path: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "provider": "soundcloud",
+        "type": "track",
+        "id": audio.track.id,
+        "title": audio.track.title,
+        "artist": audio.track.artist,
+        "duration_sec": audio.duration_sec(),
+        "artwork_url": audio.artwork_url(),
+        "page_url": audio.track.permalink_url,
+        "audio": {
+            "path": path.display().to_string(),
+            "size": audio.bytes.len(),
+            "mime": audio.mime,
+            "ext": audio.ext,
+            "preset": audio.preset,
+            "sha256": sha256_hex(&audio.bytes),
+        }
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn print_soundcloud_info(entity: &SoundCloudEntity) {
+    match entity {
+        SoundCloudEntity::Track(track) => {
+            println!("provider: soundcloud");
+            println!("type: track");
+            println!("track: {} ({})", track.id, track.title);
+            println!("artist: {}", track.artist);
+            println!("duration: {}s", track.duration_sec().unwrap_or(0));
+            println!("page: {}", track.permalink_url);
+            println!("artwork: {}", track.artwork());
+            println!("transcodings: {}", track.transcodings.len());
+            for transcoding in &track.transcodings {
+                println!(
+                    "stream: preset={} protocol={} mime={}",
+                    transcoding.preset.as_deref().unwrap_or("-"),
+                    transcoding.protocol.as_deref().unwrap_or("-"),
+                    transcoding.mime_type.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        SoundCloudEntity::Playlist(playlist) => print_soundcloud_playlist(playlist),
+    }
+}
+
+fn print_soundcloud_playlist(playlist: &SoundCloudPlaylist) {
+    println!("provider: soundcloud");
+    println!("type: playlist");
+    println!("playlist: {} ({})", playlist.id, playlist.title);
+    println!("artist: {}", playlist.artist);
+    println!("duration: {}s", playlist.duration_sec().unwrap_or(0));
+    println!("page: {}", playlist.permalink_url);
+    println!("artwork: {}", playlist.artwork());
+    println!("tracks: {}", playlist.tracks.len());
+    for (index, track) in playlist.tracks.iter().enumerate() {
+        println!(
+            "  {}. {} — {} ({}s)",
+            index + 1,
+            track.artist,
+            track.title,
+            track.duration_sec().unwrap_or(0)
+        );
+    }
+}
+
+fn print_soundcloud_value(value: &serde_json::Value) {
+    if value.get("provider").and_then(|provider| provider.as_str()) == Some("tiktok") {
+        println!(
+            "post: {}",
+            value
+                .get("post_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-")
+        );
+        println!(
+            "author: @{}",
+            value
+                .pointer("/author/id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-")
+        );
+        if let Some(video) = value.get("video") {
+            println!(
+                "video: {} ({})",
+                video
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-"),
+                human_size(
+                    video
+                        .get("size")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                )
+            );
+        }
+        if let Some(audio) = value.get("audio") {
+            println!(
+                "audio: {} ({})",
+                audio
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-"),
+                human_size(
+                    audio
+                        .get("size")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                )
+            );
+        }
+        return;
+    }
+    let kind = value
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .unwrap_or("result");
+    if kind == "playlist" {
+        println!(
+            "playlist: {} ({})",
+            value
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-"),
+            value
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-")
+        );
+        if let Some(tracks) = value.get("tracks").and_then(|tracks| tracks.as_array()) {
+            for (index, track) in tracks.iter().enumerate() {
+                let title = track
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-");
+                let artist = track
+                    .get("artist")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-");
+                let path = track
+                    .pointer("/audio/path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-");
+                let size = track
+                    .pointer("/audio/size")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                println!(
+                    "  {}. {} — {} ({} bytes) {}",
+                    index + 1,
+                    artist,
+                    title,
+                    size,
+                    path
+                );
+            }
+        }
+    } else {
+        println!(
+            "track: {} — {}",
+            value
+                .get("artist")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-"),
+            value
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-")
+        );
+        if let Some(audio) = value.get("audio") {
+            println!(
+                "audio: {} ({})",
+                audio
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-"),
+                human_size(
+                    audio
+                        .get("size")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                )
+            );
+            if let Some(hash) = audio.get("sha256").and_then(|value| value.as_str()) {
+                println!("sha256: {hash}");
+            }
+        }
+    }
 }
 
 fn read_urls_file(path: &std::path::Path) -> Result<Vec<String>, YsttError> {

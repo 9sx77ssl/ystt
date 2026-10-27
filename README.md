@@ -1,16 +1,18 @@
 # ystt
 
-**Yet Simple TikTok Toolkit** is a focused Rust library, CLI and authenticated
-HTTP API for downloading public TikTok videos, photo galleries and music tracks
-with as little protocol overhead as possible.
+**Yet Simple TikTok Toolkit** is a focused Rust library, CLI, Telegram bot and
+authenticated HTTP API for downloading public TikTok posts **and public
+SoundCloud tracks/playlists** with as little protocol overhead as possible.
 
-The project is deliberately small: one typed pipeline, no browser automation, no
-account cookies, no proxies and no mobile-API dependency. It resolves short
-links, reads TikTok's rehydration JSON, solves the WAF proof-of-work challenge
-when required, negotiates the best HTTP protocol per CDN host, and writes media
-through a content-addressed cache.
+The project is deliberately small: one typed provider layer, no browser
+automation, no account cookies, no proxies, no mobile private API and no
+ffmpeg/yt-dlp fallback. TikTok links use the rehydration/WAF pipeline; SoundCloud
+links use the public player API, dynamic `client_id` discovery, and native
+fMP4/MP3 HLS assembly. Everything is in memory for the API and bot.
 
 ## Features
+
+### TikTok
 
 - Public videos, photo galleries and optional music.
 - Full-page H.264 `playAddr` path with a four-policy quality selector.
@@ -46,6 +48,27 @@ through a content-addressed cache.
   the media CDN and, when the metadata cache is enabled, persisted with 0600
   permissions for the short signed-URL lifetime.
 
+### SoundCloud
+
+- Public tracks and `/sets/` playlists.
+- Dynamic public `client_id` discovery and caching; no cookies, login, Go+ or
+  browser emulation at runtime.
+- Full playlist hydration: SoundCloud returns ID-only stubs for most large-set
+  tracks; the client hydrates them in batches and preserves playlist order.
+- Native audio transfer with **no ffmpeg and no yt-dlp**:
+  - AAC 160/96 kbps fragmented-MP4 HLS (`aac_160k`, `aac_96k`);
+  - MP3 HLS and progressive MP3;
+  - Opus/HLS fallback;
+  - `EXT-X-MAP` init segment + ordered parallel segment assembly.
+- Quality policy mapping: `best`/`balanced` prefer 160 kbps AAC, `fast` prefers
+  96 kbps, `compatible` prefers MP3.
+- Track/playlist metadata, real artwork, duration, genre, policy checks.
+- `BLOCK`/`SNIP`/encrypted-HLS tracks are rejected with a typed error instead of
+  producing a broken preview file.
+- Auto-detection in CLI/API/bot, including mixed TikTok + SoundCloud batches.
+- Playlist support in CLI, HTTP API (`playlist` descriptor), Telegram messages
+  and inline results.
+
 ## HTTP API
 
 The workspace also ships `ystt-api`, a typed authenticated Axum API over the
@@ -58,6 +81,8 @@ range media streaming and bounded in-memory media tokens.
 - Schema: `GET /api/v1/openapi.json` with the Bearer key
 - Endpoints: health, resolve, download, batch, media (Range), stats, OpenAPI
 - Media is returned as short-lived authenticated tokens; bytes live in RAM
+- TikTok and SoundCloud auto-detection; SoundCloud playlists return a typed
+  `playlist` descriptor with per-track audio tokens
 - API guide: [`docs/API.md`](docs/API.md)
 - Crate: [`crates/ystt-api`](crates/ystt-api)
 
@@ -66,6 +91,7 @@ range media streaming and bounded in-memory media tokens.
 - Rust 1.99+ (edition 2024).
 - Linux, macOS or Windows.
 - A C toolchain, CMake, Perl and Clang for BoringSSL.
+- No ffmpeg, yt-dlp, browser runtime, SoundCloud account or API key is required.
 
 ## Build
 
@@ -82,8 +108,8 @@ ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
            [--audio] [--no-cache] [--cache-dir DIR]
 ystt --urls-file FILE [--concurrency N] [same download flags]
 ystt --progress URL    # JSON-lines progress on stderr
-ystt --filename "{author}-{post_id}-{quality}" URL
-ystt --resume URL    # continue a video from a deterministic .part file
+ystt --filename "{artist}-{title}-{quality}" URL
+ystt --resume URL    # continue a TikTok video from a deterministic .part file
 ```
 
 Examples:
@@ -93,7 +119,10 @@ ystt "https://www.tiktok.com/@user/video/123" -o downloads
 ystt --audio "https://www.tiktok.com/@user/video/123" -o downloads
 ystt "https://www.tiktok.com/@user/photo/456" -o downloads
 ystt --info --json "https://vm.tiktok.com/XXXX/"
-ystt --urls-file urls.txt --concurrency 8 -o downloads --json
+ystt "https://soundcloud.com/user/track" -o music
+ystt "https://soundcloud.com/user/sets/playlist" -o music
+ystt --info --json "https://soundcloud.com/user/track"
+ystt --urls-file mixed.txt --concurrency 8 -o downloads --json
 ```
 
 Defaults: quality `balanced`, file and metadata caches enabled, 12 photo workers,
@@ -101,6 +130,9 @@ adaptive ranges for files over 64 MiB. `--no-cache` disables both caches;
 `--cache-dir` shares the file and metadata caches across output directories.
 With `--json`, failures are emitted as a structured `ErrorInfo` object on stderr.
 `--progress` emits the unified `ProgressEvent` stream as JSON lines on stderr.
+For SoundCloud, `--filename` also supports `{artist}`, `{title}`, `{post_id}`
+(track ID) and `{quality}`; playlist files are written in track order. A mixed
+URL file preserves input order while downloading with bounded concurrency.
 
 ## Library
 
@@ -127,6 +159,33 @@ async fn main() -> Result<(), ystt::YsttError> {
     Ok(())
 }
 ```
+
+### SoundCloud
+
+```rust
+use ystt::{DownloadOptions, SoundCloudEntity, Ystt};
+
+let ystt = Ystt::builder().file_cache(false).metadata_cache(false).build()?;
+
+match ystt.resolve_soundcloud(url).await? {
+    SoundCloudEntity::Track(track) => {
+        let audio = ystt
+            .download_soundcloud_resolved_track(&track, &DownloadOptions::new())
+            .await?;
+        println!("{} / {} ({}, {} bytes)", audio.track.artist, audio.track.title, audio.mime, audio.bytes.len());
+    }
+    SoundCloudEntity::Playlist(playlist) => {
+        println!("{} tracks", playlist.tracks.len());
+    }
+}
+```
+
+`download_soundcloud_track` / `download_soundcloud_track_with` resolve and
+download one URL. `download_soundcloud_playlist_with` and
+`download_soundcloud_resolved_playlist` download a whole set with bounded
+concurrency and per-track failures. `SoundCloudAudio` exposes bytes, MIME,
+extension, selected preset, artwork, title, artist and duration. No media is
+written to disk by these methods.
 
 ### In-memory video
 
@@ -250,7 +309,10 @@ opt-in; the default is the untouched Chrome 149 profile.
 
 ## Performance
 
-Measured on x86_64 Linux, release build, no proxy and no account cookies:
+Measured on x86_64 Linux, release build, no proxy and no account cookies. The
+SoundCloud comparison uses the same Bun fetch/HLS algorithm as
+[`bench/soundcloud_bun.ts`](bench/soundcloud_bun.ts), not the old TypeScript
+module's yt-dlp fallback. Both implementations produce the same SHA-256 output.
 
 | Workload | ystt | Bun reference |
 |---|---:|---:|
@@ -258,6 +320,11 @@ Measured on x86_64 Linux, release build, no proxy and no account cookies:
 | 30.35 MiB video, warm file cache | **0 ms** | ~2.8 s |
 | 23-photo gallery, 12 workers | ~0.82–1.25 s | ~1.00–1.55 s |
 | small video, cold | 774.8 ms | 824.5 ms |
+| SoundCloud 4.17 MiB AAC track, cold (7 runs) | **1.61 s median** | 1.64 s median |
+| SoundCloud 4.17 MiB AAC track, peak RSS | **22.5 MiB** | 45.7 MiB |
+| SoundCloud 4.17 MiB AAC track, CPU | **0.057 s** | 0.125 s |
+| SoundCloud 15-track playlist, cold | **5.0 s** | n/a (TS reference rejects playlists) |
+| SoundCloud 184-track playlist, API | **105 s** | n/a |
 
 Cold single-file downloads are dominated by the TikTok page TTFB and CDN
 throughput, so expect parity with other clients on the same edge. The cache and

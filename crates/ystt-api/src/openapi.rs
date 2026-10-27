@@ -27,7 +27,7 @@ impl Modify for SecurityAddon {
     info(
         title = "ystt API",
         version = env!("CARGO_PKG_VERSION"),
-        description = "Authenticated, in-memory TikTok download API. All /v1 endpoints require a Bearer key."
+        description = "Authenticated, in-memory TikTok + SoundCloud download API. All /v1 endpoints require a Bearer key."
     ),
     servers((url = "https://ystt.d9v.uk/api")),
     paths(
@@ -45,6 +45,9 @@ impl Modify for SecurityAddon {
         crate::dto::DownloadRequest,
         crate::dto::BatchRequest,
         crate::dto::MediaDescriptor,
+        crate::dto::PlaylistDescriptor,
+        crate::dto::PlaylistTrackDescriptor,
+        crate::dto::PlaylistFailure,
         crate::dto::DownloadResponse,
         crate::dto::BatchItem,
         crate::dto::BatchResponse,
@@ -58,7 +61,12 @@ impl Modify for SecurityAddon {
         ystt::MediaInfo,
         ystt::MediaKind,
         ystt::PartialFailure,
+        ystt::Provider,
         ystt::QualityPolicy,
+        ystt::SoundCloudEntity,
+        ystt::SoundCloudPlaylist,
+        ystt::SoundCloudTrack,
+        ystt::SoundCloudTranscoding,
         ystt::Timings,
     )),
     modifiers(&SecurityAddon),

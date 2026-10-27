@@ -1,10 +1,10 @@
 [package]
 name = "ystt-api"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Typed, authenticated HTTP API for ystt"
+description = "Typed, authenticated HTTP API for TikTok and SoundCloud downloads"
 repository.workspace = true
 
 [lib]
