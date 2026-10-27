@@ -6,12 +6,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::warn;
 
+use crate::cache_util::{sanitize_key, temp_sibling, unix_now};
 use crate::error::{Result, YsttError};
 use crate::media::DownloadedFile;
 use crate::model::MediaInfo;
@@ -272,38 +273,6 @@ impl FileCache {
 
 fn is_expired(created_unix: u64, ttl: Duration) -> bool {
     unix_now().saturating_sub(created_unix) > ttl.as_secs()
-}
-
-fn temp_sibling(path: &Path) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.subsec_nanos())
-        .unwrap_or(0);
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "cache".into());
-    path.with_file_name(format!(".{name}.{}.{nanos}.tmp", std::process::id()))
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
-}
-
-fn sanitize_key(key: &str) -> String {
-    let mut out = String::with_capacity(key.len());
-    for character in key.chars() {
-        if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-            out.push(character);
-        } else {
-            out.push('_');
-        }
-    }
-    out.truncate(160);
-    out
 }
 
 #[cfg(test)]

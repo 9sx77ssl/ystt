@@ -22,6 +22,7 @@ async fn main() -> Result<(), YsttError> {
         .output_dir(&output)
         .photo_concurrency(concurrency)
         .file_cache(false)
+        .metadata_cache(false)
         .build()?;
 
     let result = ystt

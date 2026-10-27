@@ -160,6 +160,7 @@ hard safety bound (default 2,000,000).
 - exponential backoff + jitter, `Retry-After` capped by max delay;
 - per-host page limit: 2 concurrent, 120 ms spacing; media is not rate-limited;
 - timeouts: 20 s request, 10 s connect, 60 s body idle, 90 s pool idle;
+- at most 8 idle pooled connections per host;
 - `no_proxy` is enabled by default.
 
 `TransportPolicy::Auto` is the production choice. The client does not force a
@@ -433,6 +434,33 @@ adaptive single transfer  version=HTTP/2.0  bytes=31828479  # v16 video
 
 Peak RSS for the cold Rust CLI download is **≈17 MiB** (page cap 4 MiB, 2 MiB
 write buffer, bounded URL/WAF caches).
+
+### Transport comparison
+
+Same full-page resolver and single `200` media request, three cold runs per
+policy (`bench_video full-single`, metadata and file cache disabled):
+
+| Transport | Total | Page | Media |
+|---|---:|---:|---:|
+| Auto | 2.505–2.701 s | 0.436–0.516 s | 1.996–2.264 s |
+| HTTP/1.1 | 2.539–2.781 s | 0.472–0.511 s | 2.039–2.308 s |
+| HTTP/2-only | 2.778–3.063 s | 0.430–0.503 s | 2.315–2.632 s |
+
+ALPN Auto remains the best default: it gets H2 where it helps and H1 where it is
+required. Forcing H2 on this CDN was slower in every sample. The embedded
+resolver showed the same pattern; HTTP/2-only also fails on `v45` media hosts.
+
+### Batch CLI
+
+Two real URLs (30.35 MiB video + 23-photo gallery), `--urls-file`,
+`--concurrency 2`, parallel media:
+
+```text
+total ≈ 3.19 s, successes = 2, failures = 0
+```
+
+This is the main throughput win over a sequential client when multiple jobs are
+available.
 
 ### Bun baseline (historical)
 

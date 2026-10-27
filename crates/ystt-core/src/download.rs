@@ -15,6 +15,7 @@ use ystt_waf::{WafChallenge, WafSolver};
 
 use crate::cache::UrlCache;
 use crate::config::{DownloadOptions, QualityPolicy, YsttConfig};
+use crate::cookie::CookieJar;
 use crate::error::{ErrorInfo, PartialFailure, Result, YsttError};
 use crate::file_cache::{CachedFile, FileCache, FileCacheEntry};
 use crate::media::{
@@ -1467,6 +1468,12 @@ impl YsttBuilder {
         self
     }
 
+    /// Maximum idle connections kept per host.
+    pub fn pool_max_idle_per_host(mut self, count: usize) -> Self {
+        self.config.http.pool_max_idle_per_host = count;
+        self
+    }
+
     /// Total request timeout.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.config.http.timeout = timeout;
@@ -1659,51 +1666,6 @@ struct FetchOutcome {
     from_embed: bool,
 }
 
-#[derive(Default)]
-struct CookieJar {
-    values: Vec<(String, String)>,
-}
-
-impl CookieJar {
-    fn absorb(&mut self, set_cookie: &str) {
-        let pair = set_cookie.split(';').next().unwrap_or_default();
-        self.set(pair);
-    }
-
-    fn set(&mut self, pair: &str) {
-        let Some((name, value)) = pair.split_once('=') else {
-            return;
-        };
-        let name = name.trim();
-        let value = value.trim();
-        if name.is_empty() || value.is_empty() {
-            return;
-        }
-        if let Some(existing) = self
-            .values
-            .iter_mut()
-            .find(|(existing, _)| existing == name)
-        {
-            existing.1 = value.to_owned();
-        } else {
-            self.values.push((name.to_owned(), value.to_owned()));
-        }
-    }
-
-    fn header(&self) -> Option<String> {
-        if self.values.is_empty() {
-            return None;
-        }
-        Some(
-            self.values
-                .iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    }
-}
-
 fn check_cancelled(signal: Option<&CancellationToken>) -> Result<()> {
     match signal {
         Some(signal) if signal.is_cancelled() => Err(YsttError::Cancelled),
@@ -1749,27 +1711,6 @@ async fn materialize_cached(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cookie_jar_parses_and_replaces() {
-        let mut jar = CookieJar::default();
-        jar.absorb("ttwid=abc; Path=/; HttpOnly");
-        jar.absorb("waf_cookie=xyz; Path=/");
-        assert_eq!(jar.header().as_deref(), Some("ttwid=abc; waf_cookie=xyz"));
-        jar.set("waf_cookie=second");
-        assert_eq!(
-            jar.header().as_deref(),
-            Some("ttwid=abc; waf_cookie=second")
-        );
-    }
-
-    #[test]
-    fn cookie_jar_ignores_invalid_pairs() {
-        let mut jar = CookieJar::default();
-        jar.absorb("novalue; Path=/");
-        jar.absorb("=empty");
-        assert!(jar.header().is_none());
-    }
 
     #[test]
     fn millis_are_saturated() {

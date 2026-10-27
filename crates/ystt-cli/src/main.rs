@@ -4,10 +4,14 @@
 //! metadata inspection. Only flags that change user-visible behaviour are kept.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
-use ystt_core::{DownloadOptions, DownloadResult, QualityPolicy, Ystt, YsttError};
+use ystt_core::{
+    BatchOptions, BatchResult, DownloadOptions, DownloadResult, ProgressEvent, ProgressReporter,
+    QualityPolicy, Ystt, YsttError,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -18,7 +22,16 @@ use ystt_core::{DownloadOptions, DownloadResult, QualityPolicy, Ystt, YsttError}
 )]
 struct Cli {
     /// TikTok URL.
-    url: String,
+    #[arg(required_unless_present = "urls_file")]
+    url: Option<String>,
+
+    /// File with one TikTok URL per line (batch mode).
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["url", "info"])]
+    urls_file: Option<PathBuf>,
+
+    /// Batch concurrency (default 4, max 64).
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
 
     /// Output directory.
     #[arg(short = 'o', long, default_value = "downloads")]
@@ -31,6 +44,10 @@ struct Cli {
     /// Print JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
+
+    /// Emit unified progress events as JSON lines on stderr.
+    #[arg(long)]
+    progress: bool,
 
     /// Video quality policy.
     #[arg(long, value_enum, default_value_t = QualityArg::Balanced)]
@@ -71,10 +88,18 @@ impl From<QualityArg> for QualityPolicy {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let json = cli.json;
     init_tracing();
 
     if let Err(error) = run(cli).await {
-        eprintln!("error: {error}");
+        if json {
+            match serde_json::to_string(&error.info()) {
+                Ok(payload) => eprintln!("{payload}"),
+                Err(_) => eprintln!("error: {error}"),
+            }
+        } else {
+            eprintln!("error: {error}");
+        }
         std::process::exit(1);
     }
 }
@@ -91,13 +116,42 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
     }
     let ystt = builder.build()?;
 
-    let options = DownloadOptions::new()
+    let reporter = cli_reporter(cli.progress);
+    let mut options = DownloadOptions::new()
         .output_dir(&cli.output)
         .file_cache(!cli.no_cache)
         .metadata_cache(!cli.no_cache);
+    if let Some(reporter) = reporter.clone() {
+        options = options.progress(reporter);
+    }
 
+    if let Some(path) = &cli.urls_file {
+        let urls = read_urls_file(path)?;
+        let mut batch_options = BatchOptions::new()
+            .output_dir(&cli.output)
+            .quality(cli.quality.into())
+            .include_audio(cli.audio)
+            .file_cache(!cli.no_cache)
+            .metadata_cache(!cli.no_cache)
+            .concurrency(cli.concurrency);
+        if let Some(reporter) = reporter {
+            batch_options = batch_options.progress(reporter);
+        }
+        let batch = ystt.download_many(urls, batch_options).await;
+        if cli.json {
+            print_json(&batch)?;
+        } else {
+            print_batch_human(&batch);
+        }
+        return Ok(());
+    }
+
+    let url = cli
+        .url
+        .as_deref()
+        .ok_or_else(|| YsttError::InvalidUrl("missing URL".into()))?;
     if cli.info {
-        let info = ystt.resolve_with(&cli.url, &options).await?;
+        let info = ystt.resolve_with(url, &options).await?;
         if cli.json {
             print_json(&info)?;
         } else {
@@ -106,13 +160,55 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
         return Ok(());
     }
 
-    let result = ystt.download_with(&cli.url, options).await?;
+    let result = ystt.download_with(url, options).await?;
     if cli.json {
         print_json(&result)?;
     } else {
         print_human(&result);
     }
     Ok(())
+}
+
+fn read_urls_file(path: &std::path::Path) -> Result<Vec<String>, YsttError> {
+    let text = std::fs::read_to_string(path)?;
+    let urls = parse_urls(&text);
+    if urls.is_empty() {
+        return Err(YsttError::Config("URL file is empty".into()));
+    }
+    Ok(urls)
+}
+
+fn cli_reporter(enabled: bool) -> Option<ProgressReporter> {
+    enabled.then(|| {
+        Arc::new(|event: ProgressEvent| match serde_json::to_string(&event) {
+            Ok(line) => eprintln!("{line}"),
+            Err(error) => eprintln!("progress serialization error: {error}"),
+        }) as ProgressReporter
+    })
+}
+
+fn parse_urls(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn print_batch_human(batch: &BatchResult) {
+    println!(
+        "batch: total {} ms | ok {} | failed {}",
+        batch.total_ms,
+        batch.successes(),
+        batch.failures()
+    );
+    for item in &batch.items {
+        if let Some(result) = &item.result {
+            println!("ok: {} ({} ms)", item.url, result.timings.total_ms);
+        } else if let Some(error) = &item.error {
+            println!("error: {} {} ({})", item.url, error.code, error.message);
+        }
+    }
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<(), YsttError> {
@@ -231,4 +327,15 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_file_skips_comments_and_blank_lines() {
+        let urls = parse_urls("# comment\n\nhttps://a\n  https://b  \n");
+        assert_eq!(urls, vec!["https://a", "https://b"]);
+    }
 }

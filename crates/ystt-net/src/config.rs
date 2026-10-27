@@ -132,6 +132,8 @@ pub struct HttpClientConfig {
     pub read_timeout: Duration,
     /// How long idle pooled connections are kept.
     pub pool_idle_timeout: Duration,
+    /// Maximum idle connections kept per host.
+    pub pool_max_idle_per_host: usize,
     /// Retries for idempotent requests (GET/HEAD).
     pub retries: u32,
     /// Base delay for exponential backoff.
@@ -161,6 +163,7 @@ impl Default for HttpClientConfig {
             connect_timeout: Duration::from_secs(10),
             read_timeout: Duration::from_secs(60),
             pool_idle_timeout: Duration::from_secs(90),
+            pool_max_idle_per_host: 8,
             retries: 2,
             retry_base_delay: Duration::from_millis(250),
             retry_max_delay: Duration::from_secs(8),
@@ -208,6 +211,7 @@ mod tests {
         assert_eq!(config.retries, 2);
         assert!(config.no_proxy);
         assert_eq!(config.per_host_concurrency, 2);
+        assert_eq!(config.pool_max_idle_per_host, 8);
         assert_eq!(config.transport, TransportPolicy::Auto);
     }
 }

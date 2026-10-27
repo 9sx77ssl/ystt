@@ -77,6 +77,8 @@ Metadata only:
 ```text
 ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
            [--audio] [--no-cache] [--cache-dir DIR]
+ystt --urls-file FILE [--concurrency N] [same download flags]
+ystt --progress URL
 ```
 
 Defaults:
@@ -91,6 +93,10 @@ Defaults:
 - partial gallery results enabled.
 - `--no-cache` disables both file and metadata caches for one call.
 - `--cache-dir` shares file and metadata caches across output directories.
+- `--json` writes `ErrorInfo` JSON to stderr when a command fails.
+- `--urls-file` runs a batch from one URL per line (`#` comments and blank lines ignored).
+- `--concurrency` controls batch concurrency (default 4, capped at 64).
+- `--progress` writes one `ProgressEvent` JSON object per line to stderr.
 
 ## Library
 

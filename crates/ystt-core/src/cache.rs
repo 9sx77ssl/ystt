@@ -65,7 +65,7 @@ impl UrlCache {
 
     /// Store an entry, computing a TTL from the signed URLs when possible.
     pub async fn put(&self, key: String, info: MediaInfo) {
-        let ttl = entry_ttl(&info, self.ttl);
+        let ttl = media_ttl(&info, self.ttl);
         let mut entries = self.entries.write().await;
         if entries.len() >= self.max_entries {
             let now = Instant::now();
@@ -109,7 +109,7 @@ impl UrlCache {
     }
 }
 
-fn entry_ttl(info: &MediaInfo, default: Duration) -> Duration {
+pub(crate) fn media_ttl(info: &MediaInfo, default: Duration) -> Duration {
     let mut ttl = default;
     for url in info
         .video_url

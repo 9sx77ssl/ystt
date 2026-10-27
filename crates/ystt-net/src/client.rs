@@ -137,6 +137,7 @@ impl HttpClient {
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.read_timeout)
             .pool_idle_timeout(config.pool_idle_timeout)
+            .pool_max_idle_per_host(config.pool_max_idle_per_host)
             .tcp_nodelay(true)
             .gzip(true)
             .brotli(true)

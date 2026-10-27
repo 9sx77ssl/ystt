@@ -1,9 +1,9 @@
 //! Video transport benchmark.
 //!
 //! Run:
-//!   cargo run --release --example bench_video -- <url> <dir> [range|single|full] [chrome149|chrome131|firefox151|safari] [first_chunk] [min_chunk] [connections] [adaptive|fixed]
+//!   cargo run --release --example bench_video -- <url> <dir> [range|single|full] [chrome149|chrome131|firefox151|safari] [first_chunk] [min_chunk] [connections] [adaptive|fixed] [auto|http2|http1]
 
-use ystt::{BrowserProfile, DownloadOptions, Ystt, YsttError};
+use ystt::{BrowserProfile, DownloadOptions, TransportPolicy, Ystt, YsttError};
 
 #[tokio::main]
 async fn main() -> Result<(), YsttError> {
@@ -39,31 +39,39 @@ async fn main() -> Result<(), YsttError> {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(6);
     let adaptive = std::env::args().nth(8).is_none_or(|value| value != "fixed");
+    let transport: TransportPolicy = std::env::args()
+        .nth(9)
+        .unwrap_or_else(|| "auto".into())
+        .parse()
+        .map_err(YsttError::Config)?;
 
     let ystt = Ystt::builder()
+        .transport(transport)
         .output_dir(&output)
-        .parallel_ranges(mode != "single")
+        .parallel_ranges(!mode.contains("single"))
         .browser(browser)
-        .use_embed(mode != "full")
+        .use_embed(!mode.contains("full"))
         .max_connections(connections)
         .adaptive_ranges(adaptive)
         .range_start_connections(connections)
         .range_first_chunk(first_chunk)
         .range_min_chunk(min_chunk)
-        .range_threshold(if mode == "range" || mode == "full" {
+        .range_threshold(if mode.contains("range") || mode == "full" {
             0
         } else {
             u64::MAX
         })
         .file_cache(false)
+        .metadata_cache(false)
         .build()?;
 
     let result = ystt
         .download_with(&url, DownloadOptions::new().output_dir(&output))
         .await?;
     println!(
-        "mode={mode} browser={} total_ms={} page_ms={} media_ms={} size={}",
+        "mode={mode} browser={} transport={} total_ms={} page_ms={} media_ms={} size={}",
         browser.as_str(),
+        transport.as_str(),
         result.timings.total_ms,
         result.timings.page_ms,
         result.timings.media_ms,

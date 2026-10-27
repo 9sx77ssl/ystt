@@ -10,13 +10,14 @@
 //! files are restricted to the owner.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::warn;
 
-use crate::cache::signed_url_ttl;
+use crate::cache::media_ttl;
+use crate::cache_util::{sanitize_key, temp_sibling, unix_now};
 use crate::error::Result;
 use crate::model::MediaInfo;
 
@@ -118,7 +119,7 @@ impl MetadataCache {
         }
         fs::create_dir_all(&self.root).await?;
         restrict_directory_permissions(&self.root).await;
-        let ttl = metadata_ttl(info, self.ttl);
+        let ttl = media_ttl(info, self.ttl);
         let envelope = MetadataEnvelope {
             version: SCHEMA_VERSION,
             key: key.to_owned(),
@@ -242,38 +243,6 @@ pub fn filter_session_cookie(header: Option<&str>) -> Option<String> {
     (!kept.is_empty()).then(|| kept.join("; "))
 }
 
-fn metadata_ttl(info: &MediaInfo, ceiling: Duration) -> Duration {
-    let mut ttl = ceiling;
-    for url in info
-        .video_url
-        .iter()
-        .chain(info.photo_urls.iter())
-        .chain(info.audio_url.iter())
-    {
-        ttl = ttl.min(signed_url_ttl(url, ceiling));
-    }
-    ttl.max(Duration::from_secs(1))
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
-}
-
-fn temp_sibling(path: &Path) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.subsec_nanos())
-        .unwrap_or(0);
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "metadata".into());
-    path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), nanos))
-}
-
 async fn restrict_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -297,19 +266,6 @@ async fn restrict_directory_permissions(path: &Path) {
     {
         let _ = path;
     }
-}
-
-fn sanitize_key(key: &str) -> String {
-    let mut out = String::with_capacity(key.len());
-    for character in key.chars() {
-        if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-            out.push(character);
-        } else {
-            out.push('_');
-        }
-    }
-    out.truncate(160);
-    out
 }
 
 #[cfg(test)]

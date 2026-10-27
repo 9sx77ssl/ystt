@@ -55,6 +55,8 @@ The binary is `target/release/ystt`.
 ```bash
 ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
            [--audio] [--no-cache] [--cache-dir DIR]
+ystt --urls-file FILE [--concurrency N] [same download flags]
+ystt --progress URL    # JSON-lines progress on stderr
 ```
 
 Examples:
@@ -64,11 +66,14 @@ ystt "https://www.tiktok.com/@user/video/123" -o downloads
 ystt --audio "https://www.tiktok.com/@user/video/123" -o downloads
 ystt "https://www.tiktok.com/@user/photo/456" -o downloads
 ystt --info --json "https://vm.tiktok.com/XXXX/"
+ystt --urls-file urls.txt --concurrency 8 -o downloads --json
 ```
 
 Defaults: quality `balanced`, file and metadata caches enabled, 12 photo workers,
 adaptive ranges for files over 64 MiB. `--no-cache` disables both caches;
 `--cache-dir` shares the file and metadata caches across output directories.
+With `--json`, failures are emitted as a structured `ErrorInfo` object on stderr.
+`--progress` emits the unified `ProgressEvent` stream as JSON lines on stderr.
 
 ## Library
 
