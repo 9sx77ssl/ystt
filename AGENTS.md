@@ -37,6 +37,9 @@ the public `ystt` library.
 - Keep public documentation in English. Preserve typed, modular, provider-aware
   design and avoid duplicated download logic between TikTok, SoundCloud, CLI,
   API and bot.
+- For JavaScript/TypeScript tooling use **Bun only**. Never invoke `npx`, `node`
+  or an external OpenAPI validator. Keep OpenAPI generation/checking inside
+  `bun scripts/*.ts` and Rust tests.
 - Every change must pass the verification checklist below.
 
 ## Workspace map
@@ -118,7 +121,11 @@ The integration harness uses plain HTTP on loopback and therefore requires the
 - Media tokens are opaque 128-bit random values and expire. They are not
   durable object IDs.
 - OpenAPI is generated from Rust DTOs. Add new request/response types to
-  `ApiDoc` and document status codes.
+  `ApiDoc`, add a description to every response, then run
+  `YSTT_API_KEY=... bun scripts/sync-openapi.ts` and
+  `bun scripts/check-openapi.ts`. The snapshot test
+  `ystt-api/tests/openapi_contract.rs` enforces both freshness and response
+  descriptions.
 - Result cache is bounded and keyed by canonical post + complete options. A hit
   must be returned only while every referenced media token is still live.
 - Do not add an arbitrary URL fetch endpoint. TikTok URL validation is the SSRF

@@ -349,10 +349,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test --features integration-tests --test integration_pipeline
 cargo test -p ystt-api
+bun scripts/check-openapi.ts
+cargo test -p ystt-api --test openapi_contract
 cargo build --release -p ystt-api
 ```
 
-The default suite is offline. The integration suite starts a local HTTP server
+OpenAPI changes use Bun only:
+
+```bash
+bun scripts/check-openapi.ts
+YSTT_API_KEY=... bun scripts/sync-openapi.ts
+bun scripts/openapi-viewer.ts
+```
+
+`cargo test -p ystt-api --test openapi_contract` also fails if the committed
+schema is stale or if a new response lacks a description. No npx/Node tooling is
+used. The default suite is offline. The integration suite starts a local HTTP server
 and covers video ranges, session cookies, music, progress events, shared file
 cache, persistent metadata cache, batch ordering/errors, unified progress,
 partial galleries and the embed fallback.

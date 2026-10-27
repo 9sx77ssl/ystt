@@ -154,7 +154,7 @@ pub async fn openapi() -> Result<Response, ApiError> {
             format!("failed to serialize OpenAPI document: {error}"),
         )
     })?;
-    let mut response = Response::new(Body::from(pretty));
+    let mut response = Response::new(Body::from(format!("{pretty}\n")));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),

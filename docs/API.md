@@ -10,7 +10,11 @@ pipeline used by the Telegram bot. It is both a binary and a library.
 - Media bytes and metadata are held in a bounded process-local store; no media
   or cache files are written to disk.
 - OpenAPI 3.1 is generated at runtime from the Rust DTOs:
-  `GET /api/v1/openapi.json` (with the Bearer key).
+  `GET /api/v1/openapi.json` (with the Bearer key). The endpoint returns
+  pretty-printed JSON with a trailing newline.
+- Schema checks are Bun-only: `bun scripts/check-openapi.ts`; syncing is
+  `YSTT_API_KEY=... bun scripts/sync-openapi.ts`. The Rust snapshot/contract test
+  catches stale schemas and missing response descriptions.
 
 ## Endpoints
 
