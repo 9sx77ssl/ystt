@@ -16,6 +16,7 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - persistent metadata/signed-URL cache across processes;
 - batch API with bounded concurrency and per-item cancellation;
 - in-memory video downloads with no media files written to disk;
+- parallel range downloads assembled directly in memory;
 - shared cache root across output directories;
 - cross-process file-cache locks;
 - resumable videos and filename templates;

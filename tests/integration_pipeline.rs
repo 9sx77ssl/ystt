@@ -203,6 +203,38 @@ async fn video_downloads_into_memory_without_touching_disk() {
 }
 
 #[tokio::test]
+async fn video_bytes_use_parallel_ranges_for_large_payloads() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .parallel_ranges(true)
+        .max_connections(4)
+        .range_threshold(64 * 1024)
+        .range_first_chunk(64 * 1024)
+        .range_min_chunk(64 * 1024)
+        .build()
+        .unwrap();
+    let video = ystt
+        .download_video_bytes_with(
+            video_url(),
+            DownloadOptions::new().max_bytes(16 * 1024 * 1024),
+        )
+        .await
+        .unwrap();
+    assert_eq!(video.bytes.len(), support::VIDEO_SIZE);
+    assert_eq!(&video.bytes[4..8], b"ftyp");
+    assert!(
+        server.counters.ranges.load(Ordering::Relaxed) >= 3,
+        "parallel range path must issue follow-up range requests"
+    );
+    assert_eq!(server.counters.media.load(Ordering::Relaxed), 1 + 3);
+}
+
+#[tokio::test]
 async fn filename_template_is_used() {
     let server = support::start().await;
     let dir = tempfile::tempdir().unwrap();

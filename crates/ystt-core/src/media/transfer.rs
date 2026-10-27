@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
-use futures_util::StreamExt;
+use bytes::{Bytes, BytesMut};
+use futures_util::{StreamExt, stream};
 use http::header::{
     ACCEPT_RANGES, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
 };
@@ -188,6 +188,10 @@ pub(crate) async fn download_single(
 }
 
 /// Download one media resource into memory, without creating any file.
+///
+/// Large responses are split into parallel HTTP ranges when the CDN advertises
+/// range support. The first response body is used for the prefix, so the
+/// common case still costs exactly one request.
 pub(crate) async fn download_media_bytes(
     context: &MediaContext<'_>,
     url: &str,
@@ -200,7 +204,6 @@ pub(crate) async fn download_media_bytes(
         context.cookie,
         None,
     )?;
-    let request_started = Instant::now();
     let response = context
         .client
         .get(
@@ -209,7 +212,149 @@ pub(crate) async fn download_media_bytes(
             media_options(context.signal, context.media_retries),
         )
         .await?;
-    let headers_elapsed = request_started.elapsed();
+    if !response.is_success() {
+        return Err(media_status_error(&response));
+    }
+
+    let total = response.content_length();
+    if let Some(total) = total {
+        if total > context.max_bytes {
+            return Err(YsttError::FileTooLarge {
+                size: total,
+                limit: context.max_bytes,
+            });
+        }
+        if let Some(tracker) = &tracker {
+            tracker.set_total(total);
+        }
+    }
+
+    let accepts_ranges = response
+        .headers()
+        .get(ACCEPT_RANGES)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("bytes"));
+    let should_split = context.parallel_ranges
+        && context.max_connections > 1
+        && accepts_ranges
+        && total.is_some_and(|total| {
+            total > context.range_threshold
+                && total > context.first_chunk
+                && total <= context.max_bytes
+        });
+
+    if !should_split {
+        return collect_bytes_response(context, response, target.kind, tracker).await;
+    }
+
+    let total = total.ok_or_else(|| YsttError::Range("range response has no length".into()))?;
+    let etag = header_string(&response, ETAG);
+    let last_modified = header_string(&response, LAST_MODIFIED);
+    let plan = RangePlanner::new(
+        context.max_connections,
+        context.first_chunk,
+        context.min_chunk,
+    )
+    .plan(total);
+    let first = plan
+        .first_range()
+        .ok_or_else(|| YsttError::Range("empty range plan".into()))?;
+    let first_len = first.len();
+    let prefix_started = Instant::now();
+    let prefix =
+        read_stream_prefix(response, first_len, context.read_timeout, context.signal).await;
+    let prefix = match prefix {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            return if should_fallback(&error) {
+                debug!(?error, "in-memory prefix failed; retrying single stream");
+                download_media_bytes_single(context, url, target, tracker).await
+            } else {
+                Err(error)
+            };
+        }
+    };
+    if let Some(tracker) = &tracker {
+        tracker.add(prefix.len() as u64);
+    }
+    if prefix.len() as u64 != first_len {
+        return Err(YsttError::Range(format!(
+            "in-memory prefix ended after {} of {first_len} bytes",
+            prefix.len()
+        )));
+    }
+
+    let rest = plan.rest_ranges();
+    let mut parts: Vec<Bytes> = Vec::with_capacity(rest.len());
+    if !rest.is_empty() {
+        let concurrency = context.max_connections.saturating_sub(1).max(1);
+        let mut downloads = stream::iter(rest.iter().copied().enumerate().map(|(index, range)| {
+            let etag = etag.clone();
+            let last_modified = last_modified.clone();
+            let tracker = tracker.clone();
+            async move {
+                let bytes =
+                    download_range_bytes(context, url, range, etag, last_modified, tracker).await?;
+                Ok::<_, YsttError>((index, bytes))
+            }
+        }))
+        .buffer_unordered(concurrency);
+        let mut ordered: Vec<Option<Bytes>> = vec![None; rest.len()];
+        while let Some(result) = downloads.next().await {
+            let (index, bytes) = result?;
+            ordered[index] = Some(bytes);
+        }
+        for part in ordered {
+            parts.push(part.ok_or_else(|| YsttError::Range("missing range result".into()))?);
+        }
+    }
+
+    let mut result = BytesMut::with_capacity(total as usize);
+    result.extend_from_slice(&prefix);
+    for part in parts {
+        result.extend_from_slice(&part);
+    }
+    if result.len() as u64 != total {
+        return Err(YsttError::Range(format!(
+            "in-memory range assembly wrote {} of {total} bytes",
+            result.len()
+        )));
+    }
+    let bytes = result.freeze();
+    validate_bytes(&bytes, target.kind)?;
+    if let Some(tracker) = &tracker {
+        tracker.complete();
+    }
+    debug!(
+        total,
+        prefix_bytes = first_len,
+        ranges = plan.ranges.len(),
+        prefix_ms = prefix_started.elapsed().as_millis() as u64,
+        "in-memory range transfer"
+    );
+    Ok(bytes)
+}
+
+async fn download_media_bytes_single(
+    context: &MediaContext<'_>,
+    url: &str,
+    target: MediaTarget,
+    tracker: Option<std::sync::Arc<ProgressTracker>>,
+) -> Result<Bytes> {
+    let headers = BrowserHeaders::build(
+        request_kind(target.kind),
+        Some(context.referer),
+        context.cookie,
+        None,
+    )?;
+    let response = context
+        .client
+        .get(
+            url,
+            headers,
+            media_options(context.signal, context.media_retries),
+        )
+        .await?;
     if !response.is_success() {
         return Err(media_status_error(&response));
     }
@@ -224,24 +369,136 @@ pub(crate) async fn download_media_bytes(
             tracker.set_total(total);
         }
     }
+    collect_bytes_response(context, response, target.kind, tracker).await
+}
 
+async fn collect_bytes_response(
+    context: &MediaContext<'_>,
+    response: HttpResponse,
+    kind: MediaKind,
+    tracker: Option<std::sync::Arc<ProgressTracker>>,
+) -> Result<Bytes> {
     let version = response.version();
     let body_started = Instant::now();
     let bytes = response
         .bytes(context.max_bytes, context.read_timeout, context.signal)
         .await?;
-    validate_bytes(&bytes, target.kind)?;
+    validate_bytes(&bytes, kind)?;
     if let Some(tracker) = &tracker {
         tracker.add(bytes.len() as u64);
         tracker.complete();
     }
     debug!(
         ?version,
-        headers_ms = headers_elapsed.as_millis() as u64,
         body_ms = body_started.elapsed().as_millis() as u64,
         bytes = bytes.len(),
         "in-memory media transfer"
     );
+    Ok(bytes)
+}
+
+async fn read_stream_prefix(
+    response: HttpResponse,
+    limit: u64,
+    read_timeout: Duration,
+    signal: Option<&CancellationToken>,
+) -> Result<Bytes> {
+    let mut stream = response.into_stream();
+    let mut buffer = BytesMut::with_capacity(limit.min(64 * 1024 * 1024) as usize);
+    while (buffer.len() as u64) < limit {
+        let next = tokio::time::timeout(read_timeout, stream.next());
+        let item = match signal {
+            Some(signal) => {
+                tokio::select! {
+                    _ = signal.cancelled() => return Err(YsttError::Cancelled),
+                    result = next => result,
+                }
+            }
+            None => next.await,
+        };
+        match item {
+            Err(_) => return Err(YsttError::Network(NetError::Timeout)),
+            Ok(None) => break,
+            Ok(Some(Err(error))) => return Err(error.into()),
+            Ok(Some(Ok(chunk))) => {
+                let remaining = limit - buffer.len() as u64;
+                let take = (chunk.len() as u64).min(remaining) as usize;
+                buffer.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(buffer.freeze())
+}
+
+async fn download_range_bytes(
+    context: &MediaContext<'_>,
+    url: &str,
+    range: ByteRange,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    tracker: Option<std::sync::Arc<ProgressTracker>>,
+) -> Result<Bytes> {
+    let mut headers = BrowserHeaders::build(
+        RequestKind::Video,
+        Some(context.referer),
+        context.cookie,
+        None,
+    )?;
+    headers.insert(
+        RANGE,
+        HeaderValue::from_str(&format!("bytes={}-{}", range.start, range.end))
+            .map_err(|error| YsttError::Range(format!("invalid range header: {error}")))?,
+    );
+    if let Some(value) = etag.or(last_modified)
+        && let Ok(value) = HeaderValue::from_str(&value)
+    {
+        headers.insert(IF_RANGE, value);
+    }
+    let response = context
+        .client
+        .get(
+            url,
+            headers,
+            media_options(context.signal, context.media_retries),
+        )
+        .await?;
+    if response.status_u16() != 206 {
+        return Err(media_status_error(&response));
+    }
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_range)
+        .ok_or_else(|| YsttError::Range("range response has no Content-Range".into()))?;
+    if content_range.0 != range.start
+        || content_range.1 != range.end
+        || content_range
+            .2
+            .is_some_and(|total| total > context.max_bytes)
+    {
+        return Err(YsttError::Range(format!(
+            "unexpected range {}-{} got {content_range:?}",
+            range.start, range.end
+        )));
+    }
+    let bytes = response
+        .bytes(range.len().max(1), context.read_timeout, context.signal)
+        .await?;
+    if bytes.len() as u64 != range.len() {
+        return Err(YsttError::Range(format!(
+            "range {}-{} returned {} bytes",
+            range.start,
+            range.end,
+            bytes.len()
+        )));
+    }
+    if let Some(tracker) = &tracker {
+        tracker.add(bytes.len() as u64);
+    }
     Ok(bytes)
 }
 

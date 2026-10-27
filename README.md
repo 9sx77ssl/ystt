@@ -26,6 +26,7 @@ through a content-addressed cache.
 - Batch API with bounded concurrency and per-item cancellation.
 - In-memory video downloads for bots and streaming services, with no media
   files written to disk.
+- Parallel HTTP range downloads assembled directly in memory for large videos.
 - Optional shared cache root across output directories.
 - Cross-process file-cache locks.
 - Resumable videos and configurable filename templates.
@@ -123,7 +124,9 @@ send_to_telegram(video.bytes, &video.mime, video.duration_sec).await;
 ```
 
 `download_video_bytes` / `download_video_bytes_with` resolve the post and return
-the complete video as `bytes::Bytes`. They never create media or cache files;
+the complete video as `bytes::Bytes`. Videos above the configured range threshold
+use parallel CDN range requests and are assembled in RAM. They never create media
+or cache files;
 metadata caching can be enabled independently. `InMemoryVideo` also exposes the
 post ID, author, dimensions, duration and stage timings.
 

@@ -77,8 +77,8 @@ impl Ystt {
                 signal: opts.signal.as_ref(),
                 max_bytes: opts.max_bytes,
                 read_timeout: self.config.network.http.read_timeout,
-                parallel_ranges: false,
-                max_connections: 1,
+                parallel_ranges: opts.parallel_ranges,
+                max_connections: opts.max_connections,
                 first_chunk: opts.range_first_chunk,
                 min_chunk: opts.range_min_chunk,
                 range_threshold: opts.range_threshold,
@@ -86,8 +86,8 @@ impl Ystt {
                 resume: false,
                 media_retries: opts.media_retries,
                 progress: Some(emitter.clone()),
-                adaptive_ranges: false,
-                range_start_connections: 1,
+                adaptive_ranges: opts.adaptive_ranges,
+                range_start_connections: opts.range_start_connections,
             };
             let tracker = Some(ProgressTracker::new(
                 emitter.clone(),

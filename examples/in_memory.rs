@@ -13,7 +13,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let url = std::env::args()
         .nth(1)
         .ok_or("usage: in_memory <tiktok-url>")?;
-    let ystt = Ystt::builder().file_cache(false).build()?;
+    let mut builder = Ystt::builder().file_cache(false);
+    if let Ok(value) = std::env::var("YSTT_RANGE_MB") {
+        let value: u64 = value.parse()?;
+        builder = builder.range_threshold(value.saturating_mul(1024 * 1024));
+    }
+    if let Ok(value) = std::env::var("YSTT_CONNECTIONS") {
+        builder = builder.max_connections(value.parse()?);
+    }
+    let ystt = builder.build()?;
     let video = ystt
         .download_video_bytes_with(
             &url,
