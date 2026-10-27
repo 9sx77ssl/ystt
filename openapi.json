@@ -593,12 +593,12 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "URLs in input order."
+                "description": "TikTok/SoundCloud URLs in input order."
               }
             }
           }
         ],
-        "description": "Download several posts with bounded concurrency."
+        "description": "Download several TikTok/SoundCloud URLs with bounded concurrency."
       },
       "BatchResponse": {
         "type": "object",
@@ -752,7 +752,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/QualityPolicy",
-                "description": "Video stream policy. Defaults to the server policy."
+                "description": "Media stream policy. Defaults to the server policy."
               },
               {
                 "type": "null"
@@ -775,12 +775,12 @@
             "properties": {
               "url": {
                 "type": "string",
-                "description": "TikTok post, short-link or share URL."
+                "description": "TikTok or SoundCloud URL."
               }
             }
           }
         ],
-        "description": "Download one post."
+        "description": "Download one TikTok post or SoundCloud track/playlist."
       },
       "DownloadResponse": {
         "type": "object",
@@ -832,7 +832,7 @@
           },
           "cache_hit": {
             "type": "boolean",
-            "description": "Always false for the in-memory API."
+            "description": "Whether the result came from the in-process response cache."
           },
           "cover_url": {
             "type": [
@@ -1477,12 +1477,12 @@
             "properties": {
               "url": {
                 "type": "string",
-                "description": "TikTok post, short-link or share URL."
+                "description": "TikTok or SoundCloud URL."
               }
             }
           }
         ],
-        "description": "Resolve a TikTok URL without downloading media."
+        "description": "Resolve a TikTok or SoundCloud URL without downloading media."
       },
       "ResolveResponse": {
         "allOf": [

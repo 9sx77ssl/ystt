@@ -14,7 +14,7 @@ use crate::store::MediaStats;
 /// Per-request download policy.
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 pub struct DownloadOptionsInput {
-    /// Video stream policy. Defaults to the server policy.
+    /// Media stream policy. Defaults to the server policy.
     pub quality: Option<QualityPolicy>,
     /// Include the post's music track.
     pub include_audio: Option<bool>,
@@ -77,30 +77,30 @@ impl DownloadOptionsInput {
     }
 }
 
-/// Resolve a TikTok URL without downloading media.
+/// Resolve a TikTok or SoundCloud URL without downloading media.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ResolveRequest {
-    /// TikTok post, short-link or share URL.
+    /// TikTok or SoundCloud URL.
     pub url: String,
     /// Resolver quality policy.
     #[serde(flatten)]
     pub options: DownloadOptionsInput,
 }
 
-/// Download one post.
+/// Download one TikTok post or SoundCloud track/playlist.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct DownloadRequest {
-    /// TikTok post, short-link or share URL.
+    /// TikTok or SoundCloud URL.
     pub url: String,
     /// Per-request download policy.
     #[serde(flatten)]
     pub options: DownloadOptionsInput,
 }
 
-/// Download several posts with bounded concurrency.
+/// Download several TikTok/SoundCloud URLs with bounded concurrency.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct BatchRequest {
-    /// URLs in input order.
+    /// TikTok/SoundCloud URLs in input order.
     pub urls: Vec<String>,
     /// Per-item concurrency (server-capped).
     pub concurrency: Option<usize>,
@@ -232,7 +232,7 @@ pub struct DownloadResponse {
     pub failures: Vec<PartialFailure>,
     /// Stage timings.
     pub timings: Timings,
-    /// Always false for the in-memory API.
+    /// Whether the result came from the in-process response cache.
     pub cache_hit: bool,
 }
 
