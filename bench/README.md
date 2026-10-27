@@ -16,7 +16,9 @@ fallback, and it does not shell out to `ffmpeg`.
 ## Measured on this workstation
 
 Environment: x86_64 Linux, 30 GiB RAM, 12 threads, Rust 1.99 release,
-Bun 1.4.3. Seven cold runs for the track; three for the playlist. Both
+Bun 1.4.3. Seven cold runs for the track; three for the 15-track playlist.
+The 184-track API row was measured on the deployed 2-core production host.
+Both
 implementations wrote the same 4,371,992-byte file with SHA-256
 `a489fb2879bcd0b2d69915e93be89478f354d5ba1d84cf9bd63929cd18691f1c`.
 
