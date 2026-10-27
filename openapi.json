@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.5.0"
+    "version": "0.5.1"
   },
   "servers": [
     {
@@ -34,6 +34,7 @@
         },
         "responses": {
           "200": {
+            "description": "Ordered batch results",
             "content": {
               "application/json": {
                 "schema": {
@@ -43,6 +44,7 @@
             }
           },
           "400": {
+            "description": "Invalid request or batch too large",
             "content": {
               "application/json": {
                 "schema": {
@@ -52,6 +54,7 @@
             }
           },
           "401": {
+            "description": "Missing or invalid Bearer key",
             "content": {
               "application/json": {
                 "schema": {
@@ -61,6 +64,7 @@
             }
           },
           "429": {
+            "description": "Rate limit exceeded",
             "content": {
               "application/json": {
                 "schema": {
@@ -96,6 +100,7 @@
         },
         "responses": {
           "200": {
+            "description": "Downloaded media descriptors",
             "content": {
               "application/json": {
                 "schema": {
@@ -105,6 +110,7 @@
             }
           },
           "400": {
+            "description": "Invalid request, unsupported URL or oversized playlist",
             "content": {
               "application/json": {
                 "schema": {
@@ -114,6 +120,7 @@
             }
           },
           "401": {
+            "description": "Missing or invalid Bearer key",
             "content": {
               "application/json": {
                 "schema": {
@@ -123,6 +130,7 @@
             }
           },
           "404": {
+            "description": "Media is unavailable or private",
             "content": {
               "application/json": {
                 "schema": {
@@ -132,6 +140,7 @@
             }
           },
           "413": {
+            "description": "Media or request exceeds configured limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -141,6 +150,7 @@
             }
           },
           "422": {
+            "description": "One or more playlist/gallery items failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -150,6 +160,7 @@
             }
           },
           "429": {
+            "description": "Rate limit exceeded",
             "content": {
               "application/json": {
                 "schema": {
@@ -159,6 +170,7 @@
             }
           },
           "502": {
+            "description": "Upstream provider or network failure",
             "content": {
               "application/json": {
                 "schema": {
@@ -184,6 +196,7 @@
         "operationId": "health",
         "responses": {
           "200": {
+            "description": "Service is healthy",
             "content": {
               "application/json": {
                 "schema": {
@@ -193,6 +206,7 @@
             }
           },
           "401": {
+            "description": "Missing or invalid Bearer key",
             "content": {
               "application/json": {
                 "schema": {
@@ -241,6 +255,7 @@
             }
           },
           "401": {
+            "description": "Missing or invalid Bearer key",
             "content": {
               "application/json": {
                 "schema": {
@@ -250,6 +265,7 @@
             }
           },
           "404": {
+            "description": "Media token not found or expired",
             "content": {
               "application/json": {
                 "schema": {
@@ -259,6 +275,68 @@
             }
           },
           "416": {
+            "description": "Requested range is not satisfiable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "head": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "HEAD metadata for one media token.",
+        "operationId": "media_head",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Media token returned by /v1/download",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media metadata / headers",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Bearer key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Media token not found or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "Requested range is not satisfiable",
             "content": {
               "application/json": {
                 "schema": {
@@ -284,9 +362,10 @@
         "operationId": "openapi",
         "responses": {
           "200": {
-            "description": "OpenAPI 3 schema"
+            "description": "OpenAPI 3.1 schema"
           },
           "401": {
+            "description": "Missing or invalid Bearer key",
             "content": {
               "application/json": {
                 "schema": {
@@ -322,6 +401,7 @@
         },
         "responses": {
           "200": {
+            "description": "Resolved TikTok or SoundCloud metadata",
             "content": {
               "application/json": {
                 "schema": {
@@ -331,6 +411,7 @@
             }
           },
           "400": {
+            "description": "Invalid request or unsupported URL",
             "content": {
               "application/json": {
                 "schema": {
@@ -340,6 +421,7 @@
             }
           },
           "401": {
+            "description": "Missing or invalid Bearer key",
             "content": {
               "application/json": {
                 "schema": {
@@ -349,6 +431,7 @@
             }
           },
           "404": {
+            "description": "Media is unavailable or private",
             "content": {
               "application/json": {
                 "schema": {
@@ -358,6 +441,7 @@
             }
           },
           "429": {
+            "description": "Rate limit exceeded",
             "content": {
               "application/json": {
                 "schema": {
@@ -367,6 +451,7 @@
             }
           },
           "502": {
+            "description": "Upstream provider or network failure",
             "content": {
               "application/json": {
                 "schema": {
@@ -392,6 +477,7 @@
         "operationId": "stats",
         "responses": {
           "200": {
+            "description": "Media-store and queue statistics",
             "content": {
               "application/json": {
                 "schema": {
@@ -401,6 +487,7 @@
             }
           },
           "401": {
+            "description": "Missing or invalid Bearer key",
             "content": {
               "application/json": {
                 "schema": {

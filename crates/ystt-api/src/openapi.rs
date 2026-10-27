@@ -38,6 +38,7 @@ impl Modify for SecurityAddon {
         crate::routes::stats,
         crate::routes::openapi,
         crate::routes::media,
+        crate::routes::media_head,
     ),
     components(schemas(
         crate::dto::DownloadOptionsInput,

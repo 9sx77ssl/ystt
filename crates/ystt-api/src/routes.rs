@@ -23,8 +23,8 @@ use crate::store::StoredMedia;
     path = "/v1/health",
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, body = HealthResponse),
-        (status = 401, body = ErrorResponse)
+        (status = 200, description = "Service is healthy", body = HealthResponse),
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse)
     )
 )]
 /// Health/authentication probe.
@@ -41,12 +41,12 @@ pub async fn health() -> Json<HealthResponse> {
     request_body = ResolveRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, body = ResolveResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 429, body = ErrorResponse),
-        (status = 502, body = ErrorResponse)
+        (status = 200, description = "Resolved TikTok or SoundCloud metadata", body = ResolveResponse),
+        (status = 400, description = "Invalid request or unsupported URL", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse),
+        (status = 404, description = "Media is unavailable or private", body = ErrorResponse),
+        (status = 429, description = "Rate limit exceeded", body = ErrorResponse),
+        (status = 502, description = "Upstream provider or network failure", body = ErrorResponse)
     )
 )]
 /// Resolve metadata only.
@@ -67,14 +67,14 @@ pub async fn resolve(
     request_body = DownloadRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, body = DownloadResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 413, body = ErrorResponse),
-        (status = 422, body = ErrorResponse),
-        (status = 429, body = ErrorResponse),
-        (status = 502, body = ErrorResponse)
+        (status = 200, description = "Downloaded media descriptors", body = DownloadResponse),
+        (status = 400, description = "Invalid request, unsupported URL or oversized playlist", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse),
+        (status = 404, description = "Media is unavailable or private", body = ErrorResponse),
+        (status = 413, description = "Media or request exceeds configured limit", body = ErrorResponse),
+        (status = 422, description = "One or more playlist/gallery items failed", body = ErrorResponse),
+        (status = 429, description = "Rate limit exceeded", body = ErrorResponse),
+        (status = 502, description = "Upstream provider or network failure", body = ErrorResponse)
     )
 )]
 /// Download one post.
@@ -96,10 +96,10 @@ pub async fn download(
     request_body = BatchRequest,
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, body = BatchResponse),
-        (status = 400, body = ErrorResponse),
-        (status = 401, body = ErrorResponse),
-        (status = 429, body = ErrorResponse)
+        (status = 200, description = "Ordered batch results", body = BatchResponse),
+        (status = 400, description = "Invalid request or batch too large", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse),
+        (status = 429, description = "Rate limit exceeded", body = ErrorResponse)
     )
 )]
 /// Download a bounded batch.
@@ -120,8 +120,8 @@ pub async fn batch(
     path = "/v1/stats",
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, body = StatsResponse),
-        (status = 401, body = ErrorResponse)
+        (status = 200, description = "Media-store and queue statistics", body = StatsResponse),
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse)
     )
 )]
 /// Media-store and queue statistics.
@@ -140,8 +140,8 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
     path = "/v1/openapi.json",
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "OpenAPI 3 schema"),
-        (status = 401, body = ErrorResponse)
+        (status = 200, description = "OpenAPI 3.1 schema"),
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse)
     )
 )]
 /// Generated OpenAPI schema.
@@ -170,9 +170,9 @@ pub async fn openapi() -> Result<Response, ApiError> {
     responses(
         (status = 200, description = "Media bytes", content_type = "application/octet-stream"),
         (status = 206, description = "Partial media bytes", content_type = "application/octet-stream"),
-        (status = 401, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 416, body = ErrorResponse)
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse),
+        (status = 404, description = "Media token not found or expired", body = ErrorResponse),
+        (status = 416, description = "Requested range is not satisfiable", body = ErrorResponse)
     )
 )]
 /// Download one media token.
@@ -187,6 +187,18 @@ pub async fn media(
     }
 }
 
+#[utoipa::path(
+    head,
+    path = "/v1/media/{token}",
+    params(("token" = String, Path, description = "Media token returned by /v1/download")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Media metadata / headers", content_type = "application/octet-stream"),
+        (status = 401, description = "Missing or invalid Bearer key", body = ErrorResponse),
+        (status = 404, description = "Media token not found or expired", body = ErrorResponse),
+        (status = 416, description = "Requested range is not satisfiable", body = ErrorResponse)
+    )
+)]
 /// HEAD metadata for one media token.
 pub async fn media_head(
     State(state): State<AppState>,
