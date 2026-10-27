@@ -55,7 +55,7 @@ fallback, no browser automation at runtime.
 - [x] Integration tests for track, playlist, mixed batch (live + API).
 - [x] Real smoke tests with supplied public links.
 - [x] API auth/rate/OpenAPI/media tests.
-- [ ] Bot smoke (requires deployed Telegram token; local tests cover handlers).
+- [x] Bot smoke: real webhook message delivered a SoundCloud track, cached repeat and mixed TikTok+SoundCloud order.
 - [x] Bun TS baseline vs Rust:
   - [x] track cold/warm;
   - [x] artifact size/hash;
@@ -68,6 +68,6 @@ fallback, no browser automation at runtime.
 
 - [x] `README.md`, `docs/GUIDE.md`, `docs/API.md`,
       `docs/INTERNALS.md`, `ROADMAP.md`, `AGENTS.md`.
-- [ ] Deploy API/bot only after full local tests.
-- [ ] Repo description/topics update for TikTok + SoundCloud.
+- [x] Deploy API/bot after full local tests; systemd services active.
+- [x] Repo description/topics updated for TikTok + SoundCloud.
 - [x] Final security review: SSRF, host allowlist, auth, body limits, caches.
