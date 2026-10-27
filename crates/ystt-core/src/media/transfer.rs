@@ -278,10 +278,15 @@ pub(crate) async fn download_media_bytes(
         tracker.add(prefix.len() as u64);
     }
     if prefix.len() as u64 != first_len {
-        return Err(YsttError::Range(format!(
+        let error = YsttError::Range(format!(
             "in-memory prefix ended after {} of {first_len} bytes",
             prefix.len()
-        )));
+        ));
+        debug!(
+            ?error,
+            "in-memory prefix incomplete; retrying single stream"
+        );
+        return download_media_bytes_single(context, url, target, tracker.clone()).await;
     }
 
     let rest = plan.rest_ranges();
@@ -301,7 +306,15 @@ pub(crate) async fn download_media_bytes(
         .buffer_unordered(concurrency);
         let mut ordered: Vec<Option<Bytes>> = vec![None; rest.len()];
         while let Some(result) = downloads.next().await {
-            let (index, bytes) = result?;
+            let (index, bytes) = match result {
+                Ok(value) => value,
+                Err(error) if should_fallback(&error) => {
+                    debug!(?error, "in-memory range failed; retrying single stream");
+                    return download_media_bytes_single(context, url, target, tracker.clone())
+                        .await;
+                }
+                Err(error) => return Err(error),
+            };
             ordered[index] = Some(bytes);
         }
         for part in ordered {
