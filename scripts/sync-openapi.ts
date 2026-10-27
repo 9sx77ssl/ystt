@@ -26,7 +26,7 @@ const text = JSON.stringify(document, null, 2) + "\n";
 const temporary = `${output}.sync-${process.pid}.tmp`;
 await Bun.write(temporary, text);
 
-const check = Bun.spawnSync(["bun", "scripts/check-openapi.ts", temporary], {
+const check = Bun.spawnSync([process.execPath, "scripts/check-openapi.ts", temporary], {
   stdout: "inherit",
   stderr: "inherit",
 });
