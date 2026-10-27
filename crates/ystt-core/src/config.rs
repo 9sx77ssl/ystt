@@ -9,6 +9,7 @@ use ystt_waf::WafSolverConfig;
 
 /// How to choose a video stream when a post offers several bitrates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum QualityPolicy {
     /// Highest bitrate. Best visual quality, largest file.

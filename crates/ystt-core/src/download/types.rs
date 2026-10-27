@@ -13,6 +13,7 @@ use crate::progress::ProgressReporter;
 
 /// Stage timings for one download.
 #[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Timings {
     /// Full resolve stage (URL parsing, short link, page fetch).
     pub resolve_ms: u64,
@@ -84,6 +85,56 @@ pub struct InMemoryVideo {
     pub media_url: String,
     /// Complete video payload.
     pub bytes: Bytes,
+    /// Stage timings.
+    pub timings: Timings,
+}
+
+/// One media item held fully in memory.
+#[derive(Debug, Clone)]
+pub struct InMemoryFile {
+    /// Complete payload.
+    pub bytes: Bytes,
+    /// MIME type.
+    pub mime: String,
+    /// Extension without a dot.
+    pub ext: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// Source CDN URL.
+    pub source_url: String,
+    /// Media kind.
+    pub kind: crate::model::MediaKind,
+    /// Width for video/photo media.
+    pub width: Option<u32>,
+    /// Height for video/photo media.
+    pub height: Option<u32>,
+    /// Duration for video media.
+    pub duration_sec: Option<u32>,
+}
+
+/// Every media item of one post held in memory.
+#[derive(Debug, Clone)]
+pub struct InMemoryPost {
+    /// Post ID.
+    pub post_id: String,
+    /// Original input.
+    pub source_url: String,
+    /// Canonical page URL.
+    pub page_url: String,
+    /// Author.
+    pub author: crate::model::Author,
+    /// Caption.
+    pub description: Option<String>,
+    /// Cover image URL, when known.
+    pub cover_url: Option<String>,
+    /// Video payload.
+    pub video: Option<InMemoryFile>,
+    /// Gallery photos in post order.
+    pub photos: Vec<InMemoryFile>,
+    /// Music payload, when requested.
+    pub audio: Option<InMemoryFile>,
+    /// Gallery/audio items that failed under partial mode.
+    pub failures: Vec<PartialFailure>,
     /// Stage timings.
     pub timings: Timings,
 }

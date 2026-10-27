@@ -1,0 +1,40 @@
+[package]
+name = "ystt-api"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Typed, authenticated HTTP API for ystt"
+repository.workspace = true
+
+[lib]
+name = "ystt_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ystt-api"
+path = "src/main.rs"
+
+[dependencies]
+ystt = { path = "../..", features = ["openapi"] }
+axum = "0.8.9"
+bytes.workspace = true
+futures-util.workspace = true
+hex = "0.4.3"
+http.workspace = true
+rand = "0.9.5"
+serde = { workspace = true }
+serde_json.workspace = true
+sha2.workspace = true
+subtle = "2.6.1"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.6.11", features = ["limit", "timeout", "trace"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+utoipa = { version = "6.0.0", features = ["axum_extras"] }
+
+[lints]
+workspace = true

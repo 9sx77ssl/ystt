@@ -35,7 +35,8 @@ mod options;
 mod types;
 
 pub use types::{
-    BatchItemResult, BatchOptions, BatchResult, DownloadResult, InMemoryVideo, Timings,
+    BatchItemResult, BatchOptions, BatchResult, DownloadResult, InMemoryFile, InMemoryPost,
+    InMemoryVideo, Timings,
 };
 
 /// Main public downloader facade.

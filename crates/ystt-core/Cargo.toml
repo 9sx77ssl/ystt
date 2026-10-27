@@ -7,6 +7,7 @@ license.workspace = true
 description = "TikTok URL model, page parser and media download pipeline"
 
 [dependencies]
+utoipa = { version = "6.0.0", optional = true }
 blake3.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
@@ -26,6 +27,7 @@ ystt-waf.workspace = true
 workspace = true
 
 [features]
+openapi = ["dep:utoipa"]
 integration-tests = []
 
 [dev-dependencies]

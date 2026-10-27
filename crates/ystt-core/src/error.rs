@@ -12,6 +12,7 @@ pub type Result<T> = std::result::Result<T, YsttError>;
 
 /// One media item that failed during a partial gallery download.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PartialFailure {
     /// Media kind.
     pub kind: MediaKind,

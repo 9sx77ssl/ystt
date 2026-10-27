@@ -42,6 +42,18 @@ through a content-addressed cache.
   the media CDN and, when the metadata cache is enabled, persisted with 0600
   permissions for the short signed-URL lifetime.
 
+## HTTP API
+
+The workspace also ships `ystt-api`, a typed authenticated Axum API over the
+same in-memory pipeline. It generates OpenAPI 3.1 from the Rust DTOs, requires a
+Bearer key on every route, supports video/gallery/audio downloads, batch work,
+range media streaming and bounded in-memory media tokens.
+
+- Production base: `https://ystt.d9v.uk/api`
+- Schema: `GET /api/v1/openapi.json` with the Bearer key
+- API guide: [`docs/API.md`](docs/API.md)
+- Crate: [`crates/ystt-api`](crates/ystt-api)
+
 ## Requirements
 
 - Rust 1.99+ (edition 2024).

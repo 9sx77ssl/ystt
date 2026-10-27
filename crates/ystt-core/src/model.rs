@@ -8,6 +8,7 @@ use crate::config::QualityPolicy;
 use crate::error::Result;
 /// Kind of media file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum MediaKind {
     /// MP4/WebM video.
@@ -31,6 +32,7 @@ impl MediaKind {
 
 /// Post author.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Author {
     /// TikTok unique ID (handle).
     pub id: String,
@@ -40,6 +42,7 @@ pub struct Author {
 
 /// Music metadata attached to a post.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Music {
     /// Playable audio URL.
     pub url: Option<String>,
@@ -51,6 +54,7 @@ pub struct Music {
 
 /// One selectable video stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Bitrate {
     /// Declared bitrate in bits per second.
     pub bitrate: u64,
@@ -66,6 +70,7 @@ pub struct Bitrate {
 
 /// Video streams for a post.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct VideoInfo {
     /// Default playable URL.
     pub play_url: Option<String>,
@@ -85,6 +90,7 @@ pub struct VideoInfo {
 
 /// Image dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ImageDimensions {
     /// Width in pixels.
     pub width: u32,
@@ -94,6 +100,7 @@ pub struct ImageDimensions {
 
 /// One gallery image and its candidate URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ImageInfo {
     /// Candidate URLs, usually several sizes of the same image.
     pub urls: Vec<String>,
@@ -274,6 +281,7 @@ pub(crate) fn is_https_url(value: &str) -> bool {
 
 /// Resolved media metadata for one post, ready to download.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MediaInfo {
     /// Post ID.
     pub post_id: String,
