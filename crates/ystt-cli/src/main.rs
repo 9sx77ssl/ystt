@@ -30,7 +30,12 @@ struct Cli {
     urls_file: Option<PathBuf>,
 
     /// Batch concurrency (default 4, max 64).
-    #[arg(long, default_value_t = 4, requires = "urls_file")]
+    #[arg(
+        long,
+        default_value_t = 4,
+        requires = "urls_file",
+        conflicts_with = "url"
+    )]
     concurrency: usize,
 
     /// Output directory.
