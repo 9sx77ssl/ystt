@@ -142,6 +142,7 @@ impl Ystt {
         let opts = ResolvedOptions::resolve(&self.config, &options);
         let job_id = next_job_id();
         let emitter = ProgressEmitter::single(opts.progress.clone(), job_id, url);
+        let started = Instant::now();
         emitter.emit(ProgressStage::Resolving);
         let result = async {
             let entity = self
@@ -172,7 +173,9 @@ impl Ystt {
                     opts.signal.as_ref(),
                 )
                 .await?;
-            emitter.emit(ProgressStage::Completed { total_ms: 0 });
+            emitter.emit(ProgressStage::Completed {
+                total_ms: millis(started.elapsed()),
+            });
             Ok(audio)
         }
         .await;
