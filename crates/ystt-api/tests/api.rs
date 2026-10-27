@@ -75,6 +75,10 @@ async fn openapi_contains_bearer_security() {
     assert!(value["components"]["schemas"]["SoundCloudEntity"].is_object());
     assert!(value["components"]["schemas"]["PlaylistDescriptor"].is_object());
     assert!(value["components"]["schemas"]["Provider"].is_object());
+    assert!(
+        bytes.windows(3).any(|window| window == b"\n  "),
+        "OpenAPI response must be pretty-printed"
+    );
 }
 
 #[tokio::test]

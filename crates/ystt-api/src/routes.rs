@@ -145,8 +145,21 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
     )
 )]
 /// Generated OpenAPI schema.
-pub async fn openapi() -> Json<utoipa::openapi::OpenApi> {
-    Json(ApiDoc::openapi())
+pub async fn openapi() -> Result<Response, ApiError> {
+    let document = ApiDoc::openapi();
+    let pretty = serde_json::to_string_pretty(&document).map_err(|error| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("failed to serialize OpenAPI document: {error}"),
+        )
+    })?;
+    let mut response = Response::new(Body::from(pretty));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    Ok(response)
 }
 
 #[utoipa::path(

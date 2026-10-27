@@ -1,0 +1,1764 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ystt API",
+    "description": "Authenticated, in-memory TikTok + SoundCloud download API. All /v1 endpoints require a Bearer key.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "0.5.0"
+  },
+  "servers": [
+    {
+      "url": "https://ystt.d9v.uk/api"
+    }
+  ],
+  "paths": {
+    "/v1/batch": {
+      "post": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "Download a bounded batch.",
+        "operationId": "batch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/download": {
+      "post": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "Download one post.",
+        "operationId": "download",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "Health/authentication probe.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/media/{token}": {
+      "get": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "Download one media token.",
+        "operationId": "media",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Media token returned by /v1/download",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media bytes",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "206": {
+            "description": "Partial media bytes",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "Generated OpenAPI schema.",
+        "operationId": "openapi",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3 schema"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/resolve": {
+      "post": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "Resolve metadata only.",
+        "operationId": "resolve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/v1/stats": {
+      "get": {
+        "tags": [
+          "crate::routes"
+        ],
+        "summary": "Media-store and queue statistics.",
+        "operationId": "stats",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Author": {
+        "type": "object",
+        "description": "Post author.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "TikTok unique ID (handle)."
+          },
+          "nickname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name when present."
+          }
+        }
+      },
+      "BatchItem": {
+        "type": "object",
+        "description": "One batch item.",
+        "required": [
+          "index",
+          "url"
+        ],
+        "properties": {
+          "error": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ErrorBody",
+                "description": "Failure details."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "index": {
+            "type": "integer",
+            "description": "Zero-based input index.",
+            "minimum": 0
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DownloadResponse",
+                "description": "Success result."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "url": {
+            "type": "string",
+            "description": "Input URL."
+          }
+        }
+      },
+      "BatchRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DownloadOptionsInput",
+            "description": "Shared per-request download policy."
+          },
+          {
+            "type": "object",
+            "required": [
+              "urls"
+            ],
+            "properties": {
+              "concurrency": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Per-item concurrency (server-capped).",
+                "minimum": 0
+              },
+              "urls": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "URLs in input order."
+              }
+            }
+          }
+        ],
+        "description": "Download several posts with bounded concurrency."
+      },
+      "BatchResponse": {
+        "type": "object",
+        "description": "Batch response in input order.",
+        "required": [
+          "items",
+          "successes",
+          "failures",
+          "total_ms"
+        ],
+        "properties": {
+          "failures": {
+            "type": "integer",
+            "description": "Failed item count.",
+            "minimum": 0
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchItem"
+            },
+            "description": "Ordered items."
+          },
+          "successes": {
+            "type": "integer",
+            "description": "Successful item count.",
+            "minimum": 0
+          },
+          "total_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "End-to-end milliseconds.",
+            "minimum": 0
+          }
+        }
+      },
+      "Bitrate": {
+        "type": "object",
+        "description": "One selectable video stream.",
+        "required": [
+          "bitrate"
+        ],
+        "properties": {
+          "bitrate": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Declared bitrate in bits per second.",
+            "minimum": 0
+          },
+          "codec": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Codec name (`h264`, `bytevc1`, ...)."
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Stream height, when known.",
+            "minimum": 0
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stream URL."
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Stream width, when known.",
+            "minimum": 0
+          }
+        }
+      },
+      "DownloadOptionsInput": {
+        "type": "object",
+        "description": "Per-request download policy.",
+        "properties": {
+          "adaptive_ranges": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Adapt range concurrency while downloading."
+          },
+          "allow_partial": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Allow individual gallery/audio failures."
+          },
+          "include_audio": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Include the post's music track."
+          },
+          "max_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Maximum bytes for any one media item.",
+            "minimum": 0
+          },
+          "max_connections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Maximum range connections.",
+            "minimum": 0
+          },
+          "media_retries": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-media retry budget.",
+            "minimum": 0
+          },
+          "parallel_ranges": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Use parallel CDN ranges for large videos."
+          },
+          "photo_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Maximum gallery concurrency.",
+            "minimum": 0
+          },
+          "quality": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/QualityPolicy",
+                "description": "Video stream policy. Defaults to the server policy."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "DownloadRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DownloadOptionsInput",
+            "description": "Per-request download policy."
+          },
+          {
+            "type": "object",
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "TikTok post, short-link or share URL."
+              }
+            }
+          }
+        ],
+        "description": "Download one post."
+      },
+      "DownloadResponse": {
+        "type": "object",
+        "description": "Full result of an in-memory download.",
+        "required": [
+          "provider",
+          "post_id",
+          "source_url",
+          "page_url",
+          "author",
+          "photos",
+          "failures",
+          "timings",
+          "cache_hit"
+        ],
+        "properties": {
+          "artwork": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MediaDescriptor",
+                "description": "Authenticated artwork bytes (SoundCloud)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "artwork_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Square artwork URL (SoundCloud)."
+          },
+          "audio": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MediaDescriptor",
+                "description": "Music/audio when present."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "author": {
+            "$ref": "#/components/schemas/Author",
+            "description": "Author/performer."
+          },
+          "cache_hit": {
+            "type": "boolean",
+            "description": "Always false for the in-memory API."
+          },
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cover/artwork URL."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Caption/description."
+          },
+          "failures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartialFailure"
+            },
+            "description": "Partial failures."
+          },
+          "page_url": {
+            "type": "string",
+            "description": "Canonical page URL."
+          },
+          "photos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaDescriptor"
+            },
+            "description": "Gallery photos in order."
+          },
+          "playlist": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlaylistDescriptor",
+                "description": "SoundCloud playlist when the input was a set."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "post_id": {
+            "type": "string",
+            "description": "Post or track ID."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "Source provider."
+          },
+          "source_url": {
+            "type": "string",
+            "description": "Original input URL."
+          },
+          "timings": {
+            "$ref": "#/components/schemas/Timings",
+            "description": "Stage timings."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Media title (SoundCloud track/playlist title)."
+          },
+          "video": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MediaDescriptor",
+                "description": "Video when present."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "Stable machine-readable error payload.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable error code."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable message."
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Envelope returned for every non-2xx response.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody",
+            "description": "Error details."
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "description": "Liveness/readiness response.",
+        "required": [
+          "status",
+          "version"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Service state."
+          },
+          "version": {
+            "type": "string",
+            "description": "Crate version."
+          }
+        }
+      },
+      "ImageDimensions": {
+        "type": "object",
+        "description": "Image dimensions.",
+        "required": [
+          "width",
+          "height"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Height in pixels.",
+            "minimum": 0
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Width in pixels.",
+            "minimum": 0
+          }
+        }
+      },
+      "MediaDescriptor": {
+        "type": "object",
+        "description": "One media object in the response. Fetch bytes from `url` with the same Bearer key.",
+        "required": [
+          "token",
+          "url",
+          "kind",
+          "mime",
+          "ext",
+          "size",
+          "sha256",
+          "source_url"
+        ],
+        "properties": {
+          "artist": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Artist/performer for audio media."
+          },
+          "duration_sec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Duration for video/audio media.",
+            "minimum": 0
+          },
+          "ext": {
+            "type": "string",
+            "description": "Extension without a dot."
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Height for video/photo media.",
+            "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MediaKind",
+            "description": "Media kind."
+          },
+          "mime": {
+            "type": "string",
+            "description": "MIME type."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 of the payload."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          },
+          "source_url": {
+            "type": "string",
+            "description": "Original CDN URL."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Track title for audio media."
+          },
+          "token": {
+            "type": "string",
+            "description": "Short-lived opaque media token."
+          },
+          "url": {
+            "type": "string",
+            "description": "Authenticated media URL."
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Width for video/photo media.",
+            "minimum": 0
+          }
+        }
+      },
+      "MediaInfo": {
+        "type": "object",
+        "description": "Resolved media metadata for one post, ready to download.",
+        "required": [
+          "post_id",
+          "source_url",
+          "page_url",
+          "author",
+          "photo_urls",
+          "photo_dimensions",
+          "is_slideshow",
+          "is_age_restricted",
+          "bitrates"
+        ],
+        "properties": {
+          "audio_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Music URL."
+          },
+          "author": {
+            "$ref": "#/components/schemas/Author",
+            "description": "Author."
+          },
+          "bitrates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Bitrate"
+            },
+            "description": "Available video bitrates."
+          },
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cover image URL, when known."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Caption."
+          },
+          "duration_sec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Default video duration in seconds.",
+            "minimum": 0
+          },
+          "is_age_restricted": {
+            "type": "boolean",
+            "description": "Whether TikTok marks the post as age-restricted."
+          },
+          "is_slideshow": {
+            "type": "boolean",
+            "description": "Whether the post is a photo slideshow."
+          },
+          "music": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Music",
+                "description": "Music metadata."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "page_url": {
+            "type": "string",
+            "description": "Canonical TikTok page URL."
+          },
+          "photo_dimensions": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ImageDimensions"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Dimensions for each photo URL, when known."
+          },
+          "photo_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Selected photo URLs in gallery order."
+          },
+          "post_id": {
+            "type": "string",
+            "description": "Post ID."
+          },
+          "source_url": {
+            "type": "string",
+            "description": "Original user input."
+          },
+          "video_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Default video height.",
+            "minimum": 0
+          },
+          "video_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Selected video URL."
+          },
+          "video_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Default video width.",
+            "minimum": 0
+          }
+        }
+      },
+      "MediaKind": {
+        "type": "string",
+        "description": "Kind of media file.",
+        "enum": [
+          "video",
+          "photo",
+          "audio"
+        ]
+      },
+      "MediaStats": {
+        "type": "object",
+        "description": "Current media-store statistics.",
+        "required": [
+          "entries",
+          "bytes",
+          "max_bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "description": "Total stored bytes.",
+            "minimum": 0
+          },
+          "entries": {
+            "type": "integer",
+            "description": "Number of stored items.",
+            "minimum": 0
+          },
+          "max_bytes": {
+            "type": "integer",
+            "description": "Configured byte cap.",
+            "minimum": 0
+          }
+        }
+      },
+      "Music": {
+        "type": "object",
+        "description": "Music metadata attached to a post.",
+        "properties": {
+          "author": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Track author."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Track title."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Playable audio URL."
+          }
+        }
+      },
+      "PartialFailure": {
+        "type": "object",
+        "description": "One media item that failed during a partial gallery download.",
+        "required": [
+          "kind",
+          "url",
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable failure."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MediaKind",
+            "description": "Media kind."
+          },
+          "url": {
+            "type": "string",
+            "description": "Source URL."
+          }
+        }
+      },
+      "PlaylistDescriptor": {
+        "type": "object",
+        "description": "SoundCloud playlist result.",
+        "required": [
+          "playlist_id",
+          "title",
+          "artist",
+          "page_url",
+          "track_count",
+          "tracks",
+          "failures"
+        ],
+        "properties": {
+          "artist": {
+            "type": "string",
+            "description": "Playlist curator."
+          },
+          "artwork": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MediaDescriptor",
+                "description": "Authenticated artwork bytes for the playlist cover."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "artwork_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Square artwork URL."
+          },
+          "failures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlaylistFailure"
+            },
+            "description": "Tracks that failed under partial mode."
+          },
+          "page_url": {
+            "type": "string",
+            "description": "Canonical playlist page."
+          },
+          "playlist_id": {
+            "type": "string",
+            "description": "Playlist ID."
+          },
+          "title": {
+            "type": "string",
+            "description": "Playlist title."
+          },
+          "track_count": {
+            "type": "integer",
+            "description": "Number of tracks in the playlist.",
+            "minimum": 0
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlaylistTrackDescriptor"
+            },
+            "description": "Downloaded tracks in playlist order."
+          }
+        }
+      },
+      "PlaylistFailure": {
+        "type": "object",
+        "description": "One failed playlist track in an API response.",
+        "required": [
+          "track_id",
+          "title",
+          "url",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable error code."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error message."
+          },
+          "title": {
+            "type": "string",
+            "description": "Track title."
+          },
+          "track_id": {
+            "type": "string",
+            "description": "Track ID."
+          },
+          "url": {
+            "type": "string",
+            "description": "Canonical track page."
+          }
+        }
+      },
+      "PlaylistTrackDescriptor": {
+        "type": "object",
+        "description": "One track inside a SoundCloud playlist response.",
+        "required": [
+          "track_id",
+          "title",
+          "artist",
+          "page_url",
+          "audio"
+        ],
+        "properties": {
+          "artist": {
+            "type": "string",
+            "description": "Artist/performer."
+          },
+          "artwork_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Square artwork URL."
+          },
+          "audio": {
+            "$ref": "#/components/schemas/MediaDescriptor",
+            "description": "Audio descriptor."
+          },
+          "duration_sec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Duration in seconds.",
+            "minimum": 0
+          },
+          "page_url": {
+            "type": "string",
+            "description": "Canonical track page."
+          },
+          "title": {
+            "type": "string",
+            "description": "Track title."
+          },
+          "track_id": {
+            "type": "string",
+            "description": "SoundCloud track ID."
+          }
+        }
+      },
+      "Provider": {
+        "type": "string",
+        "description": "Supported public media provider.",
+        "enum": [
+          "tiktok",
+          "soundcloud"
+        ]
+      },
+      "QualityPolicy": {
+        "type": "string",
+        "description": "How to choose a video stream when a post offers several bitrates.",
+        "enum": [
+          "best",
+          "compatible",
+          "balanced",
+          "fast"
+        ]
+      },
+      "ResolveRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DownloadOptionsInput",
+            "description": "Resolver quality policy."
+          },
+          {
+            "type": "object",
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "TikTok post, short-link or share URL."
+              }
+            }
+          }
+        ],
+        "description": "Resolve a TikTok URL without downloading media."
+      },
+      "ResolveResponse": {
+        "allOf": [
+          {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MediaInfo",
+                "description": "TikTok metadata when `provider` is `tiktok`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "provider"
+            ],
+            "properties": {
+              "provider": {
+                "$ref": "#/components/schemas/Provider",
+                "description": "Detected source provider."
+              },
+              "soundcloud": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SoundCloudEntity",
+                    "description": "SoundCloud track/playlist metadata when `provider` is `soundcloud`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Resolve response."
+      },
+      "SoundCloudEntity": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A single track.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/SoundCloudTrack",
+                "description": "A single track."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "track"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A playlist with its tracks.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/SoundCloudPlaylist",
+                "description": "A playlist with its tracks."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "playlist"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Resolved SoundCloud entity."
+      },
+      "SoundCloudPlaylist": {
+        "type": "object",
+        "description": "A public SoundCloud playlist/set.",
+        "required": [
+          "id",
+          "title",
+          "artist",
+          "permalink_url",
+          "tracks"
+        ],
+        "properties": {
+          "artist": {
+            "type": "string",
+            "description": "Uploader/curator display name."
+          },
+          "artwork_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Playlist artwork, falling back to the first track's artwork."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Playlist description, when present."
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Duration in milliseconds, when known.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Playlist ID."
+          },
+          "permalink_url": {
+            "type": "string",
+            "description": "Canonical playlist page."
+          },
+          "title": {
+            "type": "string",
+            "description": "Playlist title."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SoundCloudTrack"
+            },
+            "description": "Tracks in playlist order."
+          }
+        }
+      },
+      "SoundCloudTrack": {
+        "type": "object",
+        "description": "A public SoundCloud track.",
+        "required": [
+          "id",
+          "title",
+          "artist",
+          "permalink_url",
+          "transcodings"
+        ],
+        "properties": {
+          "artist": {
+            "type": "string",
+            "description": "Uploader display name."
+          },
+          "artist_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Uploader numeric ID, when known."
+          },
+          "artwork_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Normalized square artwork URL."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Description, when present."
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Duration in milliseconds, when known.",
+            "minimum": 0
+          },
+          "genre": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Genre, when present."
+          },
+          "id": {
+            "type": "string",
+            "description": "Numeric track ID."
+          },
+          "permalink_url": {
+            "type": "string",
+            "description": "Canonical track page."
+          },
+          "policy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SoundCloud policy (`MONETIZE`, `BLOCK`, `SNIP`, ...)."
+          },
+          "title": {
+            "type": "string",
+            "description": "Track title."
+          },
+          "transcodings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SoundCloudTranscoding"
+            },
+            "description": "Public stream candidates."
+          }
+        }
+      },
+      "SoundCloudTranscoding": {
+        "type": "object",
+        "description": "One SoundCloud transcoding exposed by the public API.",
+        "required": [
+          "url",
+          "snipped"
+        ],
+        "properties": {
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Declared MIME type."
+          },
+          "preset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SoundCloud preset such as `aac_160k` or `mp3_1_0`."
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`progressive` or `hls`."
+          },
+          "snipped": {
+            "type": "boolean",
+            "description": "Whether the public API marks this stream as snipped."
+          },
+          "url": {
+            "type": "string",
+            "description": "API endpoint that returns the final signed stream URL."
+          }
+        }
+      },
+      "StatsResponse": {
+        "type": "object",
+        "description": "Runtime cache/queue statistics.",
+        "required": [
+          "media",
+          "workers",
+          "batch_concurrency",
+          "media_ttl_secs",
+          "result_cache_entries"
+        ],
+        "properties": {
+          "batch_concurrency": {
+            "type": "integer",
+            "description": "Maximum batch concurrency.",
+            "minimum": 0
+          },
+          "media": {
+            "$ref": "#/components/schemas/MediaStats",
+            "description": "Bounded media store."
+          },
+          "media_ttl_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Configured media TTL in seconds.",
+            "minimum": 0
+          },
+          "result_cache_entries": {
+            "type": "integer",
+            "description": "Number of cached download results.",
+            "minimum": 0
+          },
+          "workers": {
+            "type": "integer",
+            "description": "Maximum concurrent downloads.",
+            "minimum": 0
+          }
+        }
+      },
+      "Timings": {
+        "type": "object",
+        "description": "Stage timings for one download.",
+        "required": [
+          "resolve_ms",
+          "page_ms",
+          "waf_ms",
+          "parse_ms",
+          "media_ms",
+          "total_ms"
+        ],
+        "properties": {
+          "media_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Media transfer time.",
+            "minimum": 0
+          },
+          "page_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Page HTTP and body time.",
+            "minimum": 0
+          },
+          "parse_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "JSON parsing time.",
+            "minimum": 0
+          },
+          "resolve_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Full resolve stage (URL parsing, short link, page fetch).",
+            "minimum": 0
+          },
+          "total_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "End-to-end time.",
+            "minimum": 0
+          },
+          "waf_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "WAF challenge solving time.",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer_auth": []
+    }
+  ]
+}
