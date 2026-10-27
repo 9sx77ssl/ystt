@@ -42,6 +42,10 @@ the CLI, HTTP API and Telegram bot are thin consumers of it.
   `EXT-X-MAP` init assembly;
 - no `ffmpeg`, no `yt-dlp`, no account;
 - artwork, title, artist, duration, genre, policy and transcoding metadata;
+- sidecar 300×300 JPEG covers from the CLI and authenticated artwork tokens from
+  the API; Telegram uploads the real cover as the audio thumbnail;
+- optional disk cache for SoundCloud audio in the CLI (24 h, track+quality,
+  atomic objects/manifests); API and bot remain RAM-only;
 - typed rejection of `BLOCK`/`SNIP`/encrypted streams;
 - auto-detection and mixed TikTok/SoundCloud batches;
 - playlist downloads in CLI, API and Telegram.
@@ -123,6 +127,8 @@ Defaults:
 - partial gallery results enabled.
 - `--no-cache` disables both file and metadata caches for one call.
 - `--cache-dir` shares file and metadata caches across output directories.
+- SoundCloud downloads write a JPEG sidecar automatically and use the
+  SoundCloud disk cache unless `--no-cache` is set.
 - `--json` writes `ErrorInfo` JSON to stderr when a command fails.
 - `--urls-file` runs a batch from one URL per line (`#` comments and blank lines ignored; max 10,000 URLs / 8 MiB).
 - `--concurrency` controls batch concurrency (default 4, capped at 64); it requires `--urls-file`.
@@ -225,8 +231,10 @@ match entity {
 SoundCloud audio is selected by quality: `best`/`balanced` prefer `aac_160k`,
 `fast` prefers `aac_96k`, `compatible` prefers MP3. The output extension is
 `m4a`, `mp3` or `ogg`; MIME is returned alongside the bytes. Artwork is exposed
-as a URL for previews. `SoundCloudClient` is available through `Ystt::soundcloud()`
-for lower-level playlist hydration or custom orchestration.
+as a URL and as `SoundCloudAudio::artwork` (JPEG bytes) for direct upload.
+`SoundCloudClient` is available through `Ystt::soundcloud()` for lower-level
+playlist hydration or custom orchestration. `SoundCloudCache` is the explicit
+CLI/library disk cache; the API and bot never enable it.
 
 ## Configuration groups
 

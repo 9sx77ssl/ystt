@@ -172,6 +172,8 @@ pub struct PlaylistDescriptor {
     pub page_url: String,
     /// Square artwork URL.
     pub artwork_url: Option<String>,
+    /// Authenticated artwork bytes for the playlist cover.
+    pub artwork: Option<MediaDescriptor>,
     /// Number of tracks in the playlist.
     pub track_count: usize,
     /// Downloaded tracks in playlist order.
@@ -216,6 +218,8 @@ pub struct DownloadResponse {
     pub title: Option<String>,
     /// Square artwork URL (SoundCloud).
     pub artwork_url: Option<String>,
+    /// Authenticated artwork bytes (SoundCloud).
+    pub artwork: Option<MediaDescriptor>,
     /// Video when present.
     pub video: Option<MediaDescriptor>,
     /// Gallery photos in order.

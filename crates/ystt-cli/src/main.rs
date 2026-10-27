@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use futures_util::{StreamExt, stream};
@@ -12,8 +13,8 @@ use sha2::{Digest, Sha256};
 use tracing_subscriber::EnvFilter;
 use ystt_core::{
     BatchOptions, BatchResult, DownloadOptions, DownloadResult, ProgressEvent, ProgressReporter,
-    QualityPolicy, SoundCloudAudio, SoundCloudEntity, SoundCloudPlaylist, Ystt, YsttError,
-    is_soundcloud_url, normalize_soundcloud_url, sanitize_filename,
+    QualityPolicy, SoundCloudAudio, SoundCloudCache, SoundCloudEntity, SoundCloudPlaylist, Ystt,
+    YsttError, is_soundcloud_url, normalize_soundcloud_url, sanitize_filename,
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -135,6 +136,14 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
         builder = builder.filename_template(template);
     }
     let ystt = builder.build()?;
+    let soundcloud_cache = (!cli.no_cache).then(|| {
+        let root = cli
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| cli.output.join(".ystt-cache"))
+            .join("soundcloud");
+        SoundCloudCache::new(root, Duration::from_secs(24 * 60 * 60))
+    });
 
     let reporter = cli_reporter(cli.progress);
     let mut options = DownloadOptions::new()
@@ -153,7 +162,15 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
     if let Some(path) = &cli.urls_file {
         let urls = read_urls_file(path)?;
         if urls.iter().any(|url| is_soundcloud_url(url)) {
-            run_mixed_batch(&ystt, &cli, urls, options, reporter).await?;
+            run_mixed_batch(
+                &ystt,
+                &cli,
+                urls,
+                options,
+                reporter,
+                soundcloud_cache.as_ref(),
+            )
+            .await?;
             return Ok(());
         }
         let mut batch_options = BatchOptions::new()
@@ -193,7 +210,8 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
             }
             return Ok(());
         }
-        let value = download_soundcloud_url(&ystt, &cli, url, options).await?;
+        let value =
+            download_soundcloud_url(&ystt, &cli, url, options, soundcloud_cache.as_ref()).await?;
         if cli.json {
             print_json(&value)?;
         } else {
@@ -226,6 +244,7 @@ async fn run_mixed_batch(
     urls: Vec<String>,
     options: DownloadOptions,
     reporter: Option<ProgressReporter>,
+    cache: Option<&SoundCloudCache>,
 ) -> Result<(), YsttError> {
     let concurrency = cli.concurrency.clamp(1, 64);
     let total = urls.len();
@@ -238,7 +257,7 @@ async fn run_mixed_batch(
         item_options.progress = None;
         async move {
             let result = if is_soundcloud_url(&url) {
-                download_soundcloud_url(&ystt, &cli, &url, item_options).await
+                download_soundcloud_url(&ystt, &cli, &url, item_options, cache).await
             } else {
                 ystt.download_with(&url, item_options)
                     .await
@@ -310,21 +329,21 @@ async fn download_soundcloud_url(
     cli: &Cli,
     url: &str,
     options: DownloadOptions,
+    cache: Option<&SoundCloudCache>,
 ) -> Result<serde_json::Value, YsttError> {
     let canonical = normalize_soundcloud_url(url)?;
     let entity = ystt.resolve_soundcloud_with(&canonical, &options).await?;
     match entity {
         SoundCloudEntity::Track(track) => {
-            let audio = ystt
-                .download_soundcloud_resolved_track(&track, &options)
-                .await?;
-            let path = write_soundcloud_audio(
+            let audio =
+                soundcloud_track_cached(ystt, &track, &options, cache, cli.quality.into()).await?;
+            let (path, cover) = write_soundcloud_audio(
                 &cli.output,
                 cli.filename.as_deref(),
                 cli.quality.into(),
                 &audio,
             )?;
-            Ok(soundcloud_track_value(&audio, &path))
+            Ok(soundcloud_track_value(&audio, &path, cover.as_deref()))
         }
         SoundCloudEntity::Playlist(playlist) => {
             let track_count = playlist.tracks.len();
@@ -341,18 +360,18 @@ async fn download_soundcloud_url(
                     let output_dir = output_dir.clone();
                     let template = template.clone();
                     async move {
-                        let result = ystt
-                            .download_soundcloud_resolved_track(&track, &options)
-                            .await
-                            .and_then(|audio| {
-                                let path = write_soundcloud_audio(
-                                    &output_dir,
-                                    template.as_deref(),
-                                    quality,
-                                    &audio,
-                                )?;
-                                Ok(soundcloud_track_value(&audio, &path))
-                            });
+                        let result =
+                            soundcloud_track_cached(&ystt, &track, &options, cache, quality)
+                                .await
+                                .and_then(|audio| {
+                                    let (path, cover) = write_soundcloud_audio(
+                                        &output_dir,
+                                        template.as_deref(),
+                                        quality,
+                                        &audio,
+                                    )?;
+                                    Ok(soundcloud_track_value(&audio, &path, cover.as_deref()))
+                                });
                         (index, result)
                     }
                 },
@@ -381,12 +400,35 @@ async fn download_soundcloud_url(
     }
 }
 
+async fn soundcloud_track_cached(
+    ystt: &Ystt,
+    track: &ystt_core::SoundCloudTrack,
+    options: &DownloadOptions,
+    cache: Option<&SoundCloudCache>,
+    quality: QualityPolicy,
+) -> Result<SoundCloudAudio, YsttError> {
+    if let Some(cache) = cache
+        && let Some(audio) = cache.get(&track.id, quality).await
+    {
+        return Ok(audio);
+    }
+    let audio = ystt
+        .download_soundcloud_resolved_track(track, options)
+        .await?;
+    if let Some(cache) = cache
+        && let Err(error) = cache.put(&audio, quality).await
+    {
+        eprintln!("soundcloud cache write failed: {error}");
+    }
+    Ok(audio)
+}
+
 fn write_soundcloud_audio(
     output_dir: &std::path::Path,
     template: Option<&str>,
     quality: QualityPolicy,
     audio: &SoundCloudAudio,
-) -> Result<PathBuf, YsttError> {
+) -> Result<(PathBuf, Option<PathBuf>), YsttError> {
     std::fs::create_dir_all(output_dir)?;
     let template = template.unwrap_or("{artist} - {title}");
     let mut name = template
@@ -401,10 +443,29 @@ fn write_soundcloud_audio(
     }
     let path = output_dir.join(format!("{name}.{}", audio.ext));
     std::fs::write(&path, &audio.bytes)?;
-    Ok(path)
+    let cover = audio.artwork.as_ref().map(|artwork| {
+        let extension = match artwork.mime.as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        (path.with_extension(extension), artwork)
+    });
+    let cover_path = match cover {
+        Some((cover_path, artwork)) => {
+            std::fs::write(&cover_path, &artwork.bytes)?;
+            Some(cover_path)
+        }
+        None => None,
+    };
+    Ok((path, cover_path))
 }
 
-fn soundcloud_track_value(audio: &SoundCloudAudio, path: &std::path::Path) -> serde_json::Value {
+fn soundcloud_track_value(
+    audio: &SoundCloudAudio,
+    path: &std::path::Path,
+    cover: Option<&std::path::Path>,
+) -> serde_json::Value {
     serde_json::json!({
         "provider": "soundcloud",
         "type": "track",
@@ -414,6 +475,7 @@ fn soundcloud_track_value(audio: &SoundCloudAudio, path: &std::path::Path) -> se
         "duration_sec": audio.duration_sec(),
         "artwork_url": audio.artwork_url(),
         "page_url": audio.track.permalink_url,
+        "artwork_path": cover.map(|path| path.display().to_string()),
         "audio": {
             "path": path.display().to_string(),
             "size": audio.bytes.len(),

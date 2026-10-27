@@ -40,6 +40,18 @@ async fn real_track_downloads_valid_fmp4() {
     assert!(audio.bytes.len() > 100_000);
     assert!(audio.mime.starts_with("audio/"));
     assert!(matches!(audio.ext.as_str(), "m4a" | "mp3" | "ogg"));
+    assert!(
+        audio
+            .artwork
+            .as_ref()
+            .is_some_and(|artwork| !artwork.bytes.is_empty())
+    );
+    assert!(
+        audio
+            .artwork
+            .as_ref()
+            .is_some_and(|artwork| artwork.mime == "image/jpeg")
+    );
     if audio.ext == "m4a" {
         assert!(audio.bytes.len() > 12);
         assert_eq!(&audio.bytes[4..8], b"ftyp");

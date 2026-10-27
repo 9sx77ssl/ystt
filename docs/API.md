@@ -92,12 +92,22 @@ A SoundCloud track uses the same response with `provider: "soundcloud"`,
     "duration_sec": 216
   },
   "photos": [],
-  "playlist": null
+  "playlist": null,
+  "artwork": {
+    "token": "…",
+    "kind": "photo",
+    "mime": "image/jpeg",
+    "ext": "jpg",
+    "size": 47988,
+    "width": 300,
+    "height": 300
+  }
 }
 ```
 
 A SoundCloud `/sets/` URL returns a `playlist` descriptor with per-track
-`audio` descriptors, original order and per-track failures:
+`audio` descriptors, an authenticated playlist `artwork` token, original order
+and per-track failures:
 
 ```json
 {
@@ -109,6 +119,7 @@ A SoundCloud `/sets/` URL returns a `playlist` descriptor with per-track
     "title": "Shh!",
     "artist": "Kai Angel & 9mice",
     "track_count": 15,
+    "artwork": { "token": "…", "kind": "photo", "mime": "image/jpeg", "ext": "jpg" },
     "tracks": [
       { "track_id": "…", "title": "…", "artist": "…", "audio": { "token": "…", "kind": "audio", "ext": "m4a" } }
     ],
@@ -174,6 +185,8 @@ Stable error codes include `unauthorized`, `rate_limited`, `invalid_url`,
   900 seconds. A 184-track playlist measured ~680 MiB, so large playlists need
   the larger cap.
 - SoundCloud playlist cap: 200 tracks per request.
+- Artwork is returned as both `artwork_url` (source URL) and an authenticated
+  `artwork` token. The token is a normal short-lived media object.
 - Media tokens are 128-bit random values and are evicted by TTL/size.
 - A bounded provider-aware URL/options -> response cache (512 entries) returns
   `cache_hit: true` and skips the network entirely while all referenced media

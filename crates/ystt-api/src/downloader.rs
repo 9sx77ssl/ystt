@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use ystt::{
     Author, DownloadOptions, Http2Tuning, InMemoryFile, InMemoryPost, MediaKind, Provider,
-    QualityPolicy, SoundCloudAudio, SoundCloudEntity, Timings, Ystt, is_soundcloud_url,
-    normalize_soundcloud_url,
+    QualityPolicy, SoundCloudArtwork, SoundCloudAudio, SoundCloudEntity, Timings, Ystt,
+    is_soundcloud_url, normalize_soundcloud_url,
 };
 
 use crate::config::ApiConfig;
@@ -165,6 +165,10 @@ impl Downloader {
                     .await
                     .map_err(ApiError::from)?;
                 let descriptor = self.describe_audio(&audio);
+                let artwork_descriptor = audio
+                    .artwork
+                    .as_ref()
+                    .map(|artwork| self.describe_artwork(artwork));
                 let artwork = audio.artwork_url().to_owned();
                 Ok(DownloadResponse {
                     provider: Provider::SoundCloud,
@@ -183,6 +187,7 @@ impl Downloader {
                     cover_url: Some(artwork.clone()),
                     title: Some(track.title.clone()),
                     artwork_url: Some(artwork),
+                    artwork: artwork_descriptor,
                     video: None,
                     photos: Vec::new(),
                     audio: Some(descriptor),
@@ -243,6 +248,11 @@ impl Downloader {
                     })
                     .collect();
                 let artwork = downloaded.playlist.artwork().to_owned();
+                let artwork_descriptor = downloaded
+                    .tracks
+                    .iter()
+                    .find_map(|audio| audio.artwork.as_ref())
+                    .map(|artwork| self.describe_artwork(artwork));
                 Ok(DownloadResponse {
                     provider: Provider::SoundCloud,
                     post_id: downloaded.playlist.id.clone(),
@@ -260,6 +270,7 @@ impl Downloader {
                     cover_url: Some(artwork.clone()),
                     title: Some(downloaded.playlist.title.clone()),
                     artwork_url: Some(artwork),
+                    artwork: artwork_descriptor.clone(),
                     video: None,
                     photos: Vec::new(),
                     audio: None,
@@ -269,6 +280,7 @@ impl Downloader {
                         artist: downloaded.playlist.artist,
                         page_url: downloaded.playlist.permalink_url,
                         artwork_url: downloaded.playlist.artwork_url,
+                        artwork: artwork_descriptor,
                         track_count: total_tracks,
                         tracks,
                         failures,
@@ -440,6 +452,7 @@ impl Downloader {
             cover_url: post.cover_url.clone(),
             title: None,
             artwork_url: None,
+            artwork: None,
             video,
             photos,
             audio,
@@ -448,6 +461,40 @@ impl Downloader {
             timings: post.timings,
             cache_hit: false,
         })
+    }
+
+    fn describe_artwork(&self, artwork: &SoundCloudArtwork) -> MediaDescriptor {
+        let sha256 = sha256_hex(&artwork.bytes);
+        let ext = match artwork.mime.as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        let token = self.store.insert(StoredMedia {
+            bytes: artwork.bytes.clone(),
+            mime: artwork.mime.clone(),
+            ext: ext.into(),
+            kind: MediaKind::Photo,
+            sha256: sha256.clone(),
+            source_url: artwork.url.clone(),
+            created: Instant::now(),
+            expires: Instant::now(),
+        });
+        MediaDescriptor {
+            url: self.config.media_url(&token),
+            token,
+            kind: MediaKind::Photo,
+            mime: artwork.mime.clone(),
+            ext: ext.into(),
+            size: artwork.bytes.len() as u64,
+            sha256,
+            source_url: artwork.url.clone(),
+            width: Some(300),
+            height: Some(300),
+            duration_sec: None,
+            title: None,
+            artist: None,
+        }
     }
 
     fn describe(&self, file: InMemoryFile) -> MediaDescriptor {
@@ -501,6 +548,13 @@ fn response_is_live(response: &DownloadResponse, store: &MediaStore) -> bool {
         .iter()
         .chain(response.photos.iter())
         .chain(response.audio.iter())
+        .chain(response.artwork.iter())
+        .chain(
+            response
+                .playlist
+                .iter()
+                .flat_map(|playlist| playlist.artwork.iter()),
+        )
         .chain(
             response
                 .playlist

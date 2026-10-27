@@ -147,6 +147,8 @@ For `hls` transcodings the client fetches the media playlist and handles:
 - `#EXT-X-MAP:URI="init.mp4"` initialization segments;
 - relative URLs, query signatures and CDN redirects;
 - `#EXT-X-KEY`/`#EXT-X-SESSION-KEY` encryption -> typed refusal;
+- candidate fallback across AAC/MP3/Opus transcode presets;
+- one refresh/retry if a signed playback URL expires;
 - missing/empty segments -> typed parse error;
 - segment downloads with bounded concurrency, stored by index and concatenated
   only after all parts arrive.
@@ -166,6 +168,12 @@ the same `max_bytes` policy as TikTok. No external muxer is involved.
   media token. `YSTT_API_MAX_PLAYLIST_TRACKS` caps a single set (default 200).
 - The bot keeps only playlist metadata while downloading/sending one track at a
   time, so a large set cannot exhaust its 128 MiB process cap.
+- Artwork is downloaded as a 300×300 JPEG (max 200 KiB), exposed in-memory via
+  `SoundCloudAudio::artwork`, and uploaded as a Telegram thumbnail. The CLI also
+  writes a `.jpg` sidecar; the API exposes an authenticated artwork descriptor.
+- `SoundCloudCache` is an explicit CLI/library disk cache. It stores immutable
+  audio/cover objects plus atomic JSON manifests keyed by track ID and quality;
+  the HTTP API and Telegram bot deliberately do not enable it.
 
 ### Security boundaries
 

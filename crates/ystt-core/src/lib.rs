@@ -17,6 +17,7 @@ pub mod parse;
 pub mod plan;
 pub mod progress;
 pub mod soundcloud;
+pub mod soundcloud_cache;
 pub mod url;
 
 pub use cache::{UrlCache, signed_url_ttl};
@@ -38,9 +39,10 @@ pub use progress::{
     MediaTarget, ProgressEvent, ProgressReporter, ProgressSink, ProgressStage, progress_channel,
 };
 pub use soundcloud::{
-    SoundCloudAudio, SoundCloudClient, SoundCloudEntity, SoundCloudPlaylist,
+    SoundCloudArtwork, SoundCloudAudio, SoundCloudClient, SoundCloudEntity, SoundCloudPlaylist,
     SoundCloudPlaylistAudio, SoundCloudTrack, SoundCloudTrackFailure, SoundCloudTranscoding,
     is_soundcloud_url, normalize_url as normalize_soundcloud_url,
 };
+pub use soundcloud_cache::SoundCloudCache;
 pub use tokio_util::sync::CancellationToken;
 pub use url::{TikTokUrl, find_post_id_in_html, get_post_id};

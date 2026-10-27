@@ -63,6 +63,10 @@ fMP4/MP3 HLS assembly. Everything is in memory for the API and bot.
 - Quality policy mapping: `best`/`balanced` prefer 160 kbps AAC, `fast` prefers
   96 kbps, `compatible` prefers MP3.
 - Track/playlist metadata, real artwork, duration, genre, policy checks.
+- Downloaded 300×300 JPEG artwork sidecars and authenticated API artwork
+  descriptors; Telegram gets the real square cover.
+- Optional disk cache for SoundCloud audio (track ID + quality, 24 h TTL,
+  content-addressed objects, atomic manifests). CLI-only; API/bot stay RAM-only.
 - `BLOCK`/`SNIP`/encrypted-HLS tracks are rejected with a typed error instead of
   producing a broken preview file.
 - Auto-detection in CLI/API/bot, including mixed TikTok + SoundCloud batches.
@@ -133,6 +137,10 @@ With `--json`, failures are emitted as a structured `ErrorInfo` object on stderr
 For SoundCloud, `--filename` also supports `{artist}`, `{title}`, `{post_id}`
 (track ID) and `{quality}`; playlist files are written in track order. A mixed
 URL file preserves input order while downloading with bounded concurrency.
+SoundCloud downloads also write `{name}.jpg` next to the audio. The default
+SoundCloud disk cache lives in `<output>/.ystt-cache/soundcloud` (or
+`<cache-dir>/soundcloud`) and removes the audio transfer on repeat runs;
+`--no-cache` disables it. The API and bot never use this disk cache.
 
 ## Library
 

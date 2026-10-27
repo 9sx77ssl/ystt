@@ -9,12 +9,13 @@
 //! account login path. Progressive MP3, HLS MP3 and fragmented-MP4 AAC are
 //! supported directly.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, stream};
-use http::header::{ACCEPT, HeaderMap, HeaderValue, LOCATION, REFERER};
+use http::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, LOCATION, REFERER};
 use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,17 @@ pub struct SoundCloudTranscoding {
     pub mime_type: Option<String>,
     /// Whether the public API marks this stream as snipped.
     pub snipped: bool,
+}
+
+/// Downloaded square artwork for a SoundCloud track.
+#[derive(Debug, Clone)]
+pub struct SoundCloudArtwork {
+    /// JPEG payload suitable for Telegram thumbnails.
+    pub bytes: Bytes,
+    /// Detected MIME type.
+    pub mime: String,
+    /// Normalized source URL.
+    pub url: String,
 }
 
 /// A public SoundCloud track.
@@ -181,6 +193,8 @@ pub struct SoundCloudAudio {
     pub source_url: String,
     /// Preset selected for transfer.
     pub preset: Option<String>,
+    /// Downloaded artwork, if available.
+    pub artwork: Option<SoundCloudArtwork>,
 }
 
 impl SoundCloudAudio {
@@ -224,6 +238,7 @@ pub struct SoundCloudPlaylistAudio {
 pub struct SoundCloudClient {
     http: HttpClient,
     client_id: Arc<Mutex<Option<CachedClientId>>>,
+    resolved: Arc<Mutex<HashMap<String, CachedEntity>>>,
     page_limit: u64,
     read_timeout: Duration,
 }
@@ -231,6 +246,12 @@ pub struct SoundCloudClient {
 #[derive(Debug, Clone)]
 struct CachedClientId {
     id: String,
+}
+
+#[derive(Clone)]
+struct CachedEntity {
+    entity: SoundCloudEntity,
+    inserted: Instant,
 }
 
 impl std::fmt::Debug for SoundCloudClient {
@@ -248,6 +269,7 @@ impl SoundCloudClient {
         Self {
             http,
             client_id: Arc::new(Mutex::new(None)),
+            resolved: Arc::new(Mutex::new(HashMap::new())),
             page_limit,
             read_timeout,
         }
@@ -266,18 +288,21 @@ impl SoundCloudClient {
     ) -> Result<SoundCloudEntity> {
         let input = self.expand_short_url(input, signal).await?;
         let input = normalize_url(&input)?;
+        if let Some(entity) = self.cached_resolved(&input) {
+            return Ok(entity);
+        }
         let mut refreshed = false;
-        loop {
+        let entity = loop {
             let client_id = self.client_id(signal).await?;
             let endpoint = resolve_endpoint(&input, &client_id)?;
             match self.get_json::<RawEntity>(&endpoint, signal).await {
                 Ok(raw) => {
                     let entity = raw.into_entity()?;
-                    return match entity {
-                        SoundCloudEntity::Playlist(playlist) => Ok(SoundCloudEntity::Playlist(
+                    break match entity {
+                        SoundCloudEntity::Playlist(playlist) => SoundCloudEntity::Playlist(
                             self.hydrate_playlist(playlist, signal).await?,
-                        )),
-                        track => Ok(track),
+                        ),
+                        track => track,
                     };
                 }
                 Err(YsttError::Network(NetError::Status { status, .. }))
@@ -289,7 +314,9 @@ impl SoundCloudClient {
                 }
                 Err(error) => return Err(error),
             }
-        }
+        };
+        self.store_resolved(&input, &entity);
+        Ok(entity)
     }
 
     /// Follow `on.soundcloud.com` share redirects without a browser or cookies.
@@ -406,7 +433,79 @@ impl SoundCloudClient {
                 *slot = track;
             }
         }
+
+        // If a batch request failed, fall back to individual track lookups for
+        // any remaining ID-only stubs. This is slower but keeps large playlists
+        // usable through transient batch errors.
+        let remaining: Vec<(usize, String)> = playlist
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| track.transcodings.is_empty() && !track.id.is_empty())
+            .map(|(index, track)| (index, track.id.clone()))
+            .collect();
+        if !remaining.is_empty() {
+            let mut calls = stream::iter(remaining.into_iter().map(|(index, id)| {
+                let client = self.clone();
+                let client_id = client_id.clone();
+                async move {
+                    let endpoint = format!("{API_ORIGIN}/tracks/{id}?client_id={client_id}");
+                    let raw = client.get_json::<RawTrack>(&endpoint, signal).await;
+                    (index, raw)
+                }
+            }))
+            .buffer_unordered(8);
+            while let Some((index, raw)) = calls.next().await {
+                if let Ok(track) = raw.and_then(RawTrack::into_track)
+                    && let Some(slot) = playlist.tracks.get_mut(index)
+                {
+                    *slot = track;
+                }
+            }
+        }
         Ok(playlist)
+    }
+
+    fn cached_resolved(&self, key: &str) -> Option<SoundCloudEntity> {
+        let now = Instant::now();
+        let mut entries = self
+            .resolved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match entries.get(key) {
+            Some(entry) if now.duration_since(entry.inserted) < Duration::from_secs(120) => {
+                Some(entry.entity.clone())
+            }
+            Some(_) => {
+                entries.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn store_resolved(&self, key: &str, entity: &SoundCloudEntity) {
+        let now = Instant::now();
+        let mut entries = self
+            .resolved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries.retain(|_, entry| now.duration_since(entry.inserted) < Duration::from_secs(120));
+        if entries.len() >= 128
+            && let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.inserted)
+                .map(|(key, _)| key.clone())
+        {
+            entries.remove(&oldest);
+        }
+        entries.insert(
+            key.to_owned(),
+            CachedEntity {
+                entity: entity.clone(),
+                inserted: now,
+            },
+        );
     }
 
     /// Download one resolved track.
@@ -426,35 +525,96 @@ impl SoundCloudClient {
             )));
         }
 
-        let transcoding = pick_transcoding(track, quality).ok_or_else(|| {
-            YsttError::Unavailable(format!(
+        let candidates = candidate_transcodings(track, quality);
+        if candidates.is_empty() {
+            return Err(YsttError::Unavailable(format!(
                 "SoundCloud track {} has no supported public stream",
                 track.id
-            ))
-        })?;
-        let (mime, ext) = output_format(transcoding);
-        let stream = match self.stream_url(track, transcoding, signal).await {
-            Err(YsttError::Network(NetError::Status {
-                status: 401 | 403, ..
-            })) => {
-                self.invalidate_client_id();
-                self.stream_url(track, transcoding, signal).await
-            }
-            other => other,
+            )));
         }
-        .map_err(|error| match error {
-            YsttError::Network(NetError::Status { status: 404, .. }) => {
-                YsttError::Unavailable("SoundCloud stream expired or is unavailable".into())
+        let mut last_error = None;
+        for transcoding in candidates {
+            let (mime, ext) = output_format(transcoding);
+            match self
+                .download_transcoding(
+                    track,
+                    transcoding,
+                    max_bytes,
+                    max_connections,
+                    retries,
+                    signal,
+                )
+                .await
+            {
+                Ok((bytes, stream)) => {
+                    if bytes.is_empty() {
+                        last_error = Some(YsttError::Unavailable(
+                            "SoundCloud returned empty audio".into(),
+                        ));
+                        continue;
+                    }
+                    if bytes.len() as u64 > max_bytes {
+                        last_error = Some(YsttError::FileTooLarge {
+                            size: bytes.len() as u64,
+                            limit: max_bytes,
+                        });
+                        continue;
+                    }
+                    let artwork = match self.download_artwork(track, signal).await {
+                        Ok(artwork) => artwork,
+                        Err(error) => {
+                            debug!(?error, track_id = %track.id, "SoundCloud artwork failed");
+                            None
+                        }
+                    };
+                    return Ok(SoundCloudAudio {
+                        track: track.clone(),
+                        bytes,
+                        mime: mime.to_owned(),
+                        ext: ext.to_owned(),
+                        source_url: stream,
+                        preset: transcoding.preset.clone(),
+                        artwork,
+                    });
+                }
+                Err(YsttError::Cancelled) => return Err(YsttError::Cancelled),
+                Err(error) => {
+                    debug!(
+                        ?error,
+                        track_id = %track.id,
+                        preset = transcoding.preset.as_deref().unwrap_or("-"),
+                        "SoundCloud stream candidate failed; trying fallback"
+                    );
+                    last_error = Some(error);
+                }
             }
-            other => other,
-        })?;
+        }
+        Err(last_error.unwrap_or_else(|| {
+            YsttError::Unavailable(format!(
+                "SoundCloud track {} has no working public stream",
+                track.id
+            ))
+        }))
+    }
 
+    async fn download_transcoding(
+        &self,
+        track: &SoundCloudTrack,
+        transcoding: &SoundCloudTranscoding,
+        max_bytes: u64,
+        max_connections: usize,
+        retries: u32,
+        signal: Option<&CancellationToken>,
+    ) -> Result<(Bytes, String)> {
+        let stream = self
+            .stream_url_with_refresh(track, transcoding, signal)
+            .await?;
         let is_hls = transcoding
             .protocol
             .as_deref()
             .is_some_and(|protocol| protocol.eq_ignore_ascii_case("hls"))
             || stream.contains(".m3u8");
-        let bytes = if is_hls {
+        let first = if is_hls {
             self.download_hls(
                 &stream,
                 max_bytes,
@@ -462,31 +622,93 @@ impl SoundCloudClient {
                 retries,
                 signal,
             )
-            .await?
+            .await
         } else {
             self.download_direct(&stream, max_bytes, retries, signal)
-                .await?
+                .await
         };
-        if bytes.is_empty() {
-            return Err(YsttError::Unavailable(
-                "SoundCloud returned empty audio".into(),
-            ));
+        match first {
+            Ok(bytes) => Ok((bytes, stream)),
+            Err(YsttError::Network(NetError::Status {
+                status: 401 | 403 | 404,
+                ..
+            })) => {
+                // A signed playback URL may expire between resolve and the
+                // first segment. Refresh it once and retry the same audio.
+                let refreshed = self
+                    .stream_url_with_refresh(track, transcoding, signal)
+                    .await?;
+                let bytes = if is_hls {
+                    self.download_hls(
+                        &refreshed,
+                        max_bytes,
+                        max_connections.clamp(1, 16),
+                        retries,
+                        signal,
+                    )
+                    .await?
+                } else {
+                    self.download_direct(&refreshed, max_bytes, retries, signal)
+                        .await?
+                };
+                Ok((bytes, refreshed))
+            }
+            Err(error) => Err(error),
         }
-        if bytes.len() as u64 > max_bytes {
-            return Err(YsttError::FileTooLarge {
-                size: bytes.len() as u64,
-                limit: max_bytes,
-            });
-        }
+    }
 
-        Ok(SoundCloudAudio {
-            track: track.clone(),
+    async fn stream_url_with_refresh(
+        &self,
+        track: &SoundCloudTrack,
+        transcoding: &SoundCloudTranscoding,
+        signal: Option<&CancellationToken>,
+    ) -> Result<String> {
+        match self.stream_url(track, transcoding, signal).await {
+            Err(YsttError::Network(NetError::Status {
+                status: 401 | 403, ..
+            })) => {
+                self.invalidate_client_id();
+                self.stream_url(track, transcoding, signal).await
+            }
+            Err(YsttError::Network(NetError::Status { status: 404, .. })) => Err(
+                YsttError::Unavailable("SoundCloud stream expired or is unavailable".into()),
+            ),
+            other => other,
+        }
+    }
+
+    async fn download_artwork(
+        &self,
+        track: &SoundCloudTrack,
+        signal: Option<&CancellationToken>,
+    ) -> Result<Option<SoundCloudArtwork>> {
+        let Some(url) = track.artwork_url.as_deref() else {
+            return Ok(None);
+        };
+        let mut options = RequestOptions::media().with_retries(1);
+        if let Some(signal) = signal {
+            options = options.with_signal(signal.clone());
+        }
+        let response = self.http.get(url, self.media_headers(), options).await?;
+        ensure_success(&response, url)?;
+        let declared = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_owned();
+        let bytes = response
+            .bytes(200 * 1024, self.read_timeout, signal)
+            .await?;
+        let Some(mime) = detect_image_mime(&bytes, &declared) else {
+            debug!(track_id = %track.id, %declared, "SoundCloud artwork is not a supported image");
+            return Ok(None);
+        };
+        Ok(Some(SoundCloudArtwork {
             bytes,
             mime: mime.to_owned(),
-            ext: ext.to_owned(),
-            source_url: stream,
-            preset: transcoding.preset.clone(),
-        })
+            url: url.to_owned(),
+        }))
     }
 
     /// Discover and cache a public `client_id`.
@@ -820,6 +1042,20 @@ static RE_CLIENT_ID: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
 static RE_SCRIPT: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r#"<script[^>]+src="([^"]+)""#).unwrap());
 
+fn detect_image_mime(bytes: &[u8], declared: &str) -> Option<&'static str> {
+    if bytes.len() >= 3 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 8 && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    debug!(%declared, bytes = bytes.len(), "unsupported artwork signature");
+    None
+}
+
 fn output_format(transcoding: &SoundCloudTranscoding) -> (&'static str, &'static str) {
     let preset = transcoding.preset.as_deref().unwrap_or_default();
     let mime = transcoding.mime_type.as_deref().unwrap_or_default();
@@ -832,10 +1068,10 @@ fn output_format(transcoding: &SoundCloudTranscoding) -> (&'static str, &'static
     }
 }
 
-fn pick_transcoding(
+fn candidate_transcodings(
     track: &SoundCloudTrack,
     quality: QualityPolicy,
-) -> Option<&SoundCloudTranscoding> {
+) -> Vec<&SoundCloudTranscoding> {
     let order: &[&str] = match quality {
         QualityPolicy::Best | QualityPolicy::Balanced => &[
             "aac_160k", "mp3_1_0", "aac_96k", "mp3_0_1", "opus_1_0", "opus_0_0", "abr_sq",
@@ -847,17 +1083,32 @@ fn pick_transcoding(
             "aac_96k", "mp3_0_1", "opus_0_0", "aac_160k", "mp3_1_0", "opus_1_0", "abr_sq",
         ],
     };
+    let mut candidates = Vec::new();
     for preset in order {
-        if let Some(transcoding) = track.transcodings.iter().find(|transcoding| {
+        for transcoding in track.transcodings.iter().filter(|transcoding| {
             transcoding.preset.as_deref() == Some(*preset) && !transcoding.snipped
         }) {
-            return Some(transcoding);
+            if !candidates
+                .iter()
+                .any(|existing: &&SoundCloudTranscoding| existing.url == transcoding.url)
+            {
+                candidates.push(transcoding);
+            }
         }
     }
-    track
+    for transcoding in track
         .transcodings
         .iter()
-        .find(|transcoding| !transcoding.snipped)
+        .filter(|transcoding| !transcoding.snipped)
+    {
+        if !candidates
+            .iter()
+            .any(|existing: &&SoundCloudTranscoding| existing.url == transcoding.url)
+        {
+            candidates.push(transcoding);
+        }
+    }
+    candidates
 }
 
 #[derive(Default)]
@@ -1196,22 +1447,19 @@ mod tests {
             track_authorization: None,
         };
         assert_eq!(
-            pick_transcoding(&track, QualityPolicy::Best)
-                .unwrap()
+            candidate_transcodings(&track, QualityPolicy::Best)[0]
                 .preset
                 .as_deref(),
             Some("aac_160k")
         );
         assert_eq!(
-            pick_transcoding(&track, QualityPolicy::Fast)
-                .unwrap()
+            candidate_transcodings(&track, QualityPolicy::Fast)[0]
                 .preset
                 .as_deref(),
             Some("aac_96k")
         );
         assert_eq!(
-            pick_transcoding(&track, QualityPolicy::Compatible)
-                .unwrap()
+            candidate_transcodings(&track, QualityPolicy::Compatible)[0]
                 .preset
                 .as_deref(),
             Some("mp3_1_0")
