@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::warn;
 
-use crate::cache_util::{sanitize_key, temp_sibling, unix_now};
+use crate::cache_util::{FileLock, acquire_lock, sanitize_key, temp_sibling, unix_now};
 use crate::error::{Result, YsttError};
 use crate::media::DownloadedFile;
 use crate::model::MediaInfo;
@@ -62,6 +62,15 @@ impl FileCache {
     /// Cache root.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Acquire an exclusive cross-process lock for one cache key.
+    pub(crate) async fn lock(&self, key: &str) -> Result<FileLock> {
+        let path = self
+            .root
+            .join("locks")
+            .join(format!("{}.lock", sanitize_key(key)));
+        Ok(acquire_lock(&path).await?)
     }
 
     /// Read a fresh manifest and verify every referenced object exists.
@@ -255,7 +264,7 @@ impl FileCache {
 
     /// Delete all manifests and objects.
     pub async fn clear(&self) -> Result<()> {
-        for directory in ["manifests", "objects"] {
+        for directory in ["manifests", "objects", "locks"] {
             let path = self.root.join(directory);
             if fs::metadata(&path).await.is_ok() {
                 fs::remove_dir_all(path).await?;

@@ -23,8 +23,10 @@ through a content-addressed cache.
 - One-request `200` path for typical videos; adaptive ranges for large files.
 - BLAKE3 content-addressed file cache with TTL and atomic manifests.
 - Persistent metadata/signed-URL cache across processes.
-- Batch API with bounded concurrency.
+- Batch API with bounded concurrency and per-item cancellation.
 - Optional shared cache root across output directories.
+- Cross-process file-cache locks.
+- Resumable videos and configurable filename templates.
 - Optional HTTP/2 connection/keep-alive tuning without changing the TLS/JA3/JA4
   or HTTP/2 settings fingerprint.
 - Expiry-aware signed-URL cache.
@@ -57,6 +59,8 @@ ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
            [--audio] [--no-cache] [--cache-dir DIR]
 ystt --urls-file FILE [--concurrency N] [same download flags]
 ystt --progress URL    # JSON-lines progress on stderr
+ystt --filename "{author}-{post_id}-{quality}" URL
+ystt --resume URL    # continue a video from a deterministic .part file
 ```
 
 Examples:

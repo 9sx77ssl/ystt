@@ -1,22 +1,20 @@
 //! End-to-end TikTok resolution and download pipeline.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, stream};
 use http::header::LOCATION;
-use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use ystt_net::{BrowserHeaders, HttpClient, NetError, RequestKind, RequestOptions};
 use ystt_waf::{WafChallenge, WafSolver};
 
 use crate::cache::UrlCache;
+use crate::cache_util::FileLock;
 use crate::config::{DownloadOptions, QualityPolicy, YsttConfig};
 use crate::cookie::CookieJar;
-use crate::error::{ErrorInfo, PartialFailure, Result, YsttError};
+use crate::error::{PartialFailure, Result, YsttError};
 use crate::file_cache::{CachedFile, FileCache, FileCacheEntry};
 use crate::media::{
     DownloadedFile, MediaContext, audio_ext, base_filename, download_media, photo_ext, video_ext,
@@ -24,207 +22,13 @@ use crate::media::{
 use crate::metadata::{MetadataCache, default_metadata_root};
 use crate::model::{MediaInfo, MediaKind, TikTokItem};
 use crate::parse::{PageParse, parse_embed_page, parse_page};
-use crate::progress::{MediaTarget, ProgressEmitter, ProgressReporter, ProgressStage, next_job_id};
+use crate::progress::{MediaTarget, ProgressEmitter, ProgressStage, next_job_id};
 use crate::url::{TikTokUrl, find_post_id_in_html};
 
-/// Stage timings for one download.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct Timings {
-    /// Full resolve stage (URL parsing, short link, page fetch).
-    pub resolve_ms: u64,
-    /// Page HTTP and body time.
-    pub page_ms: u64,
-    /// WAF challenge solving time.
-    pub waf_ms: u64,
-    /// JSON parsing time.
-    pub parse_ms: u64,
-    /// Media transfer time.
-    pub media_ms: u64,
-    /// End-to-end time.
-    pub total_ms: u64,
-}
+mod batch;
+mod types;
 
-/// Result of one download job.
-#[derive(Debug, Clone, Serialize)]
-pub struct DownloadResult {
-    /// Post ID.
-    pub post_id: String,
-    /// Original input.
-    pub source_url: String,
-    /// Canonical page URL.
-    pub page_url: String,
-    /// Author.
-    pub author: crate::model::Author,
-    /// Caption.
-    pub description: Option<String>,
-    /// Video file, if any.
-    pub video: Option<DownloadedFile>,
-    /// Gallery photos in post order.
-    pub photos: Vec<DownloadedFile>,
-    /// Music file, if requested.
-    pub audio: Option<DownloadedFile>,
-    /// Gallery items that failed under partial mode.
-    pub failures: Vec<PartialFailure>,
-    /// Whether the result came from the content-addressed file cache.
-    pub cache_hit: bool,
-    /// Stage timings.
-    pub timings: Timings,
-}
-
-/// Options for one batch download job.
-#[derive(Clone)]
-pub struct BatchOptions {
-    /// Maximum number of URLs downloaded concurrently (capped at 64).
-    pub concurrency: usize,
-    /// Output directory override.
-    pub output_dir: Option<PathBuf>,
-    /// Quality policy override.
-    pub quality: Option<QualityPolicy>,
-    /// Include music tracks.
-    pub include_audio: Option<bool>,
-    /// Enable or disable the file cache.
-    pub file_cache: Option<bool>,
-    /// Enable or disable the metadata cache.
-    pub metadata_cache: Option<bool>,
-    /// Allow partial gallery results.
-    pub allow_partial: Option<bool>,
-    /// Progress reporter for batch and item events.
-    pub progress: Option<ProgressReporter>,
-    /// Cancellation token shared by every item.
-    pub signal: Option<CancellationToken>,
-}
-
-impl std::fmt::Debug for BatchOptions {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BatchOptions")
-            .field("concurrency", &self.concurrency)
-            .field("output_dir", &self.output_dir)
-            .field("quality", &self.quality)
-            .field("include_audio", &self.include_audio)
-            .field("file_cache", &self.file_cache)
-            .field("metadata_cache", &self.metadata_cache)
-            .field("allow_partial", &self.allow_partial)
-            .field("progress", &self.progress.is_some())
-            .field("signal", &self.signal.is_some())
-            .finish()
-    }
-}
-
-impl Default for BatchOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BatchOptions {
-    /// Create options with a conservative default concurrency of four.
-    pub fn new() -> Self {
-        Self {
-            concurrency: 4,
-            output_dir: None,
-            quality: None,
-            include_audio: None,
-            file_cache: None,
-            metadata_cache: None,
-            allow_partial: None,
-            progress: None,
-            signal: None,
-        }
-    }
-
-    /// Set the maximum number of concurrent downloads.
-    pub fn concurrency(mut self, concurrency: usize) -> Self {
-        self.concurrency = concurrency.max(1);
-        self
-    }
-
-    /// Set the output directory.
-    pub fn output_dir(mut self, output_dir: impl Into<PathBuf>) -> Self {
-        self.output_dir = Some(output_dir.into());
-        self
-    }
-
-    /// Set the quality policy.
-    pub fn quality(mut self, quality: QualityPolicy) -> Self {
-        self.quality = Some(quality);
-        self
-    }
-
-    /// Include or exclude music.
-    pub fn include_audio(mut self, include: bool) -> Self {
-        self.include_audio = Some(include);
-        self
-    }
-
-    /// Enable or disable the file cache.
-    pub fn file_cache(mut self, enabled: bool) -> Self {
-        self.file_cache = Some(enabled);
-        self
-    }
-
-    /// Enable or disable the metadata cache.
-    pub fn metadata_cache(mut self, enabled: bool) -> Self {
-        self.metadata_cache = Some(enabled);
-        self
-    }
-
-    /// Allow partial gallery results.
-    pub fn allow_partial(mut self, allow: bool) -> Self {
-        self.allow_partial = Some(allow);
-        self
-    }
-
-    /// Attach a batch progress reporter.
-    pub fn progress(mut self, reporter: ProgressReporter) -> Self {
-        self.progress = Some(reporter);
-        self
-    }
-
-    /// Attach a cancellation token.
-    pub fn signal(mut self, signal: CancellationToken) -> Self {
-        self.signal = Some(signal);
-        self
-    }
-}
-
-/// Result for one URL in a batch.
-#[derive(Debug, Clone, Serialize)]
-pub struct BatchItemResult {
-    /// Original URL, in input order.
-    pub url: String,
-    /// Successful download, if any.
-    pub result: Option<DownloadResult>,
-    /// Stable error payload, if the item failed.
-    pub error: Option<ErrorInfo>,
-}
-
-/// Results for a batch, preserving input order.
-#[derive(Debug, Clone, Serialize)]
-pub struct BatchResult {
-    /// Per-URL results in input order.
-    pub items: Vec<BatchItemResult>,
-    /// End-to-end wall time.
-    pub total_ms: u64,
-}
-
-impl BatchResult {
-    /// Number of successful items.
-    pub fn successes(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|item| item.result.is_some())
-            .count()
-    }
-
-    /// Number of failed items.
-    pub fn failures(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|item| item.error.is_some())
-            .count()
-    }
-}
+pub use types::{BatchItemResult, BatchOptions, BatchResult, DownloadResult, Timings};
 
 /// Main public downloader facade.
 #[derive(Clone)]
@@ -403,11 +207,13 @@ impl Ystt {
 
         emitter.emit(ProgressStage::Resolving);
 
-        if file_cache_enabled
-            && let Some(result) = self
-                .try_file_cache(url, &options, &output_dir, quality, include_audio, emitter)
+        let (cached, cache_lock) = if file_cache_enabled {
+            self.try_file_cache(url, &options, &output_dir, quality, include_audio, emitter)
                 .await?
-        {
+        } else {
+            (None, None)
+        };
+        if let Some(result) = cached {
             emitter.emit(ProgressStage::Completed {
                 total_ms: result.timings.total_ms,
             });
@@ -494,6 +300,7 @@ impl Ystt {
                 tracing::warn!(?error, "failed to store file cache");
             }
         }
+        drop(cache_lock);
 
         info!(
             post_id = %resolved.info.post_id,
@@ -524,101 +331,6 @@ impl Ystt {
         Ok(result)
     }
 
-    /// Download a batch of URLs with bounded concurrency.
-    ///
-    /// Results preserve input order. A failed item does not cancel the rest;
-    /// the error is returned as a typed [`ErrorInfo`] in its slot.
-    pub async fn download_many<I, S>(&self, urls: I, options: BatchOptions) -> BatchResult
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let started = Instant::now();
-        let urls: Vec<String> = urls.into_iter().map(Into::into).collect();
-        let total_items = urls.len();
-        let job_id = next_job_id();
-        let root = ProgressEmitter::batch(options.progress.clone(), job_id, total_items);
-        root.emit(ProgressStage::BatchStarted { total_items });
-        let completed_items = Arc::new(AtomicUsize::new(0));
-        let failed_items = Arc::new(AtomicUsize::new(0));
-        let concurrency = if options.concurrency == 0 {
-            4
-        } else {
-            options.concurrency.min(64)
-        };
-        let mut items = stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
-            let downloader = self.clone();
-            let batch = options.clone();
-            let item_emitter = root.child(&url, index, total_items);
-            let batch_emitter = root.clone();
-            let completed_items = completed_items.clone();
-            let failed_items = failed_items.clone();
-            async move {
-                let mut item_options = DownloadOptions::new();
-                item_options.output_dir = batch.output_dir.clone();
-                item_options.quality = batch.quality;
-                item_options.include_audio = batch.include_audio;
-                item_options.file_cache = batch.file_cache;
-                item_options.metadata_cache = batch.metadata_cache;
-                item_options.allow_partial = batch.allow_partial;
-                item_options.signal = batch.signal.clone();
-                let result = downloader
-                    .download_with_emitter(&url, item_options, &item_emitter)
-                    .await;
-                let item = match result {
-                    Ok(result) => BatchItemResult {
-                        url,
-                        result: Some(result),
-                        error: None,
-                    },
-                    Err(error) => {
-                        item_emitter.emit(ProgressStage::Failed {
-                            error: error.info(),
-                        });
-                        BatchItemResult {
-                            url,
-                            result: None,
-                            error: Some(error.info()),
-                        }
-                    }
-                };
-                if item.result.is_some() {
-                    let completed = completed_items.fetch_add(1, Ordering::Relaxed) + 1;
-                    batch_emitter.emit(ProgressStage::BatchProgress {
-                        completed_items: completed,
-                        failed_items: failed_items.load(Ordering::Relaxed),
-                        total_items,
-                    });
-                } else {
-                    let failed = failed_items.fetch_add(1, Ordering::Relaxed) + 1;
-                    batch_emitter.emit(ProgressStage::BatchProgress {
-                        completed_items: completed_items.load(Ordering::Relaxed),
-                        failed_items: failed,
-                        total_items,
-                    });
-                }
-                (index, item)
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
-        items.sort_by_key(|(index, _)| *index);
-        let results: Vec<BatchItemResult> = items.into_iter().map(|(_, item)| item).collect();
-        let successes = results.iter().filter(|item| item.result.is_some()).count();
-        let failures = results.len().saturating_sub(successes);
-        let total_ms = millis(started.elapsed());
-        root.emit(ProgressStage::BatchCompleted {
-            total_ms,
-            successes,
-            failures,
-        });
-        BatchResult {
-            items: results,
-            total_ms,
-        }
-    }
-
     async fn try_file_cache(
         &self,
         url: &str,
@@ -627,16 +339,17 @@ impl Ystt {
         quality: QualityPolicy,
         include_audio: bool,
         emitter: &ProgressEmitter,
-    ) -> Result<Option<DownloadResult>> {
+    ) -> Result<(Option<DownloadResult>, Option<FileLock>)> {
         let started = Instant::now();
         let parsed = TikTokUrl::parse(url)?;
         let signal = options.signal.as_ref();
         let post_id = self.resolve_post_id(&parsed, signal).await?;
         let key = file_cache_key(&post_id, quality, include_audio);
         let cache = FileCache::new(self.file_cache_root(output_dir), self.config.file_cache_ttl);
+        let lock = cache.lock(&key).await?;
 
         let Some(entry) = cache.get(&key).await else {
-            return Ok(None);
+            return Ok((None, Some(lock)));
         };
 
         let materialize_started = Instant::now();
@@ -645,7 +358,7 @@ impl Ystt {
                 Ok(file) => Some(file),
                 Err(error) => {
                     tracing::warn!(?error, "failed to materialize cached video");
-                    return Ok(None);
+                    return Ok((None, Some(lock)));
                 }
             },
             None => None,
@@ -656,7 +369,7 @@ impl Ystt {
                 Ok(file) => photos.push(file),
                 Err(error) => {
                     tracing::warn!(?error, "failed to materialize cached photo");
-                    return Ok(None);
+                    return Ok((None, Some(lock)));
                 }
             }
         }
@@ -665,7 +378,7 @@ impl Ystt {
                 Ok(file) => Some(file),
                 Err(error) => {
                     tracing::warn!(?error, "failed to materialize cached audio");
-                    return Ok(None);
+                    return Ok((None, Some(lock)));
                 }
             },
             None => None,
@@ -679,24 +392,27 @@ impl Ystt {
             post_id: info.post_id.clone(),
         });
 
-        Ok(Some(DownloadResult {
-            post_id: info.post_id,
-            source_url: info.source_url,
-            page_url: info.page_url,
-            author: info.author,
-            description: info.description,
-            video,
-            photos,
-            audio,
-            failures: Vec::new(),
-            cache_hit: true,
-            timings: Timings {
-                resolve_ms: millis(elapsed),
-                media_ms: millis(media_elapsed),
-                total_ms: millis(elapsed),
-                ..Timings::default()
-            },
-        }))
+        Ok((
+            Some(DownloadResult {
+                post_id: info.post_id,
+                source_url: info.source_url,
+                page_url: info.page_url,
+                author: info.author,
+                description: info.description,
+                video,
+                photos,
+                audio,
+                failures: Vec::new(),
+                cache_hit: true,
+                timings: Timings {
+                    resolve_ms: millis(elapsed),
+                    media_ms: millis(media_elapsed),
+                    total_ms: millis(elapsed),
+                    ..Timings::default()
+                },
+            }),
+            None,
+        ))
     }
 
     async fn store_file_cache(
@@ -776,7 +492,9 @@ impl Ystt {
         let max_bytes = options.max_bytes.unwrap_or(self.config.max_bytes);
         let include_audio = options.include_audio.unwrap_or(self.config.include_audio);
         let reuse_existing = options.reuse_existing.unwrap_or(self.config.reuse_existing);
+        let resume = options.resume.unwrap_or(self.config.resume);
         let media_retries = options.media_retries.unwrap_or(self.config.media_retries);
+        let quality = options.quality.unwrap_or(self.config.quality);
 
         let context = MediaContext {
             client: &self.http,
@@ -791,6 +509,7 @@ impl Ystt {
             min_chunk: self.config.range_min_chunk,
             range_threshold: self.config.range_threshold,
             reuse_existing,
+            resume,
             media_retries,
             progress: Some(emitter.clone()),
             adaptive_ranges: options
@@ -799,7 +518,12 @@ impl Ystt {
             range_start_connections: self.config.range_start_connections,
         };
 
-        let base = base_filename(&info.author.id, &info.post_id);
+        let spec = quality.as_str();
+        let template = options
+            .filename_template
+            .as_deref()
+            .or(self.config.filename_template.as_deref());
+        let base = base_filename(template, &info.author.id, &info.post_id, spec);
         let output_dir = output_dir.to_path_buf();
         let video_url = info.video_url.clone();
         let audio_url = info.audio_url.clone();
@@ -1387,266 +1111,9 @@ impl Ystt {
     }
 }
 
-/// Builder for [`Ystt`].
-#[derive(Debug, Clone, Default)]
-pub struct YsttBuilder {
-    config: YsttConfig,
-}
+mod builder;
 
-impl YsttBuilder {
-    /// New builder with defaults.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Default output directory.
-    pub fn output_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.output_dir = path.into();
-        self
-    }
-
-    /// Default quality policy.
-    pub fn quality(mut self, quality: QualityPolicy) -> Self {
-        self.config.quality = quality;
-        self
-    }
-
-    /// Download music tracks.
-    ///
-    /// Audio uses the same pipeline and ALPN Auto transport as video; H1-only
-    /// music hosts fall back to HTTP/1.1 automatically.
-    pub fn include_audio(mut self, include: bool) -> Self {
-        self.config.include_audio = include;
-        self
-    }
-
-    /// Enable range-first parallel downloads.
-    pub fn parallel_ranges(mut self, enabled: bool) -> Self {
-        self.config.parallel_ranges = enabled;
-        self
-    }
-
-    /// Maximum range connections.
-    pub fn max_connections(mut self, connections: usize) -> Self {
-        self.config.max_connections = connections.max(1);
-        self
-    }
-
-    /// Maximum photo concurrency.
-    pub fn photo_concurrency(mut self, concurrency: usize) -> Self {
-        self.config.photo_concurrency = concurrency.max(1);
-        self
-    }
-
-    /// Maximum media size.
-    pub fn max_bytes(mut self, max: u64) -> Self {
-        self.config.max_bytes = max;
-        self
-    }
-
-    /// Maximum page/JSON size.
-    pub fn max_page_bytes(mut self, max: u64) -> Self {
-        self.config.max_page_bytes = max;
-        self
-    }
-
-    /// Browser fingerprint profile.
-    pub fn browser(mut self, browser: ystt_net::BrowserProfile) -> Self {
-        self.config.http.browser = browser;
-        self
-    }
-
-    /// HTTP transport policy (`Auto`, `Http2Only`, `Http1Only`).
-    pub fn transport(mut self, transport: ystt_net::TransportPolicy) -> Self {
-        self.config.http.transport = transport;
-        self
-    }
-
-    /// Optional HTTP/2 tuning that preserves TLS/JA3/JA4 and H2 settings.
-    pub fn http2_tuning(mut self, tuning: ystt_net::Http2Tuning) -> Self {
-        self.config.http.http2 = tuning;
-        self
-    }
-
-    /// Maximum idle connections kept per host.
-    pub fn pool_max_idle_per_host(mut self, count: usize) -> Self {
-        self.config.http.pool_max_idle_per_host = count;
-        self
-    }
-
-    /// Total request timeout.
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.config.http.timeout = timeout;
-        self
-    }
-
-    /// Connection timeout.
-    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.config.http.connect_timeout = timeout;
-        self
-    }
-
-    /// Body idle timeout.
-    pub fn read_timeout(mut self, timeout: Duration) -> Self {
-        self.config.http.read_timeout = timeout;
-        self
-    }
-
-    /// HTTP retry count.
-    pub fn retries(mut self, retries: u32) -> Self {
-        self.config.http.retries = retries;
-        self
-    }
-
-    /// Page concurrency per host.
-    pub fn per_host_concurrency(mut self, concurrency: usize) -> Self {
-        self.config.http.per_host_concurrency = concurrency.max(1);
-        self
-    }
-
-    /// Minimum spacing between page requests.
-    pub fn min_request_interval(mut self, interval: Duration) -> Self {
-        self.config.http.min_request_interval = interval;
-        self
-    }
-
-    /// Override the emulated user-agent.
-    pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
-        self.config.http.user_agent = Some(user_agent.into());
-        self
-    }
-
-    /// Disable environment/system proxies.
-    pub fn no_proxy(mut self, disabled: bool) -> Self {
-        self.config.http.no_proxy = disabled;
-        self
-    }
-
-    /// Enable or disable the lightweight embed resolver.
-    pub fn use_embed(mut self, enabled: bool) -> Self {
-        self.config.use_embed = enabled;
-        self
-    }
-
-    /// WAF solver thread count.
-    pub fn waf_threads(mut self, threads: usize) -> Self {
-        self.config.waf.threads = Some(threads.max(1));
-        self
-    }
-
-    /// WAF solver iteration cap.
-    pub fn waf_max_iterations(mut self, max: u64) -> Self {
-        self.config.waf.max_iterations = max;
-        self
-    }
-
-    /// Signed-URL cache TTL.
-    pub fn cache_ttl(mut self, ttl: Duration) -> Self {
-        self.config.cache_ttl = ttl;
-        self
-    }
-
-    /// Reuse existing output files.
-    pub fn reuse_existing(mut self, reuse: bool) -> Self {
-        self.config.reuse_existing = reuse;
-        self
-    }
-
-    /// Enable or disable the content-addressed file cache.
-    pub fn file_cache(mut self, enabled: bool) -> Self {
-        self.config.file_cache = enabled;
-        self
-    }
-
-    /// Override the file-cache root.
-    pub fn file_cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.file_cache_dir = Some(path.into());
-        self
-    }
-
-    /// Shared cache root for file and metadata caches across output directories.
-    pub fn cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.cache_dir = Some(path.into());
-        self
-    }
-
-    /// File-cache TTL.
-    pub fn file_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.config.file_cache_ttl = ttl;
-        self
-    }
-
-    /// Enable or disable the persistent metadata cache.
-    pub fn metadata_cache(mut self, enabled: bool) -> Self {
-        self.config.metadata_cache = enabled;
-        self
-    }
-
-    /// Override the metadata-cache root.
-    pub fn metadata_cache_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.metadata_cache_dir = Some(path.into());
-        self
-    }
-
-    /// Metadata-cache TTL ceiling.
-    pub fn metadata_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.config.metadata_cache_ttl = ttl;
-        self
-    }
-
-    /// Advanced: override the page origin (local integration tests/mirrors).
-    pub fn page_origin(mut self, origin: impl Into<String>) -> Self {
-        self.config.page_origin = Some(origin.into().trim_end_matches('/').to_owned());
-        self
-    }
-
-    /// Retry budget for each media item.
-    pub fn media_retries(mut self, retries: u32) -> Self {
-        self.config.media_retries = retries;
-        self
-    }
-
-    /// Allow partial gallery results.
-    pub fn allow_partial(mut self, allow: bool) -> Self {
-        self.config.allow_partial = allow;
-        self
-    }
-
-    /// Enable adaptive range concurrency.
-    pub fn adaptive_ranges(mut self, enabled: bool) -> Self {
-        self.config.adaptive_ranges = enabled;
-        self
-    }
-
-    /// Initial range connections when adaptive mode is enabled.
-    pub fn range_start_connections(mut self, connections: usize) -> Self {
-        self.config.range_start_connections = connections.max(1);
-        self
-    }
-
-    /// First range size for videos.
-    pub fn range_first_chunk(mut self, bytes: u64) -> Self {
-        self.config.range_first_chunk = bytes.max(1);
-        self
-    }
-
-    /// Minimum follow-up range size.
-    pub fn range_min_chunk(mut self, bytes: u64) -> Self {
-        self.config.range_min_chunk = bytes.max(1);
-        self
-    }
-
-    /// Files at or below this size use one normal GET instead of ranges.
-    pub fn range_threshold(mut self, bytes: u64) -> Self {
-        self.config.range_threshold = bytes;
-        self
-    }
-
-    /// Build the downloader.
-    pub fn build(self) -> Result<Ystt> {
-        Ystt::new(self.config)
-    }
-}
+pub use builder::YsttBuilder;
 
 struct Resolved {
     info: MediaInfo,

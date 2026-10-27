@@ -41,6 +41,8 @@ pub struct YsttConfig {
     pub output_dir: PathBuf,
     /// Default quality policy.
     pub quality: QualityPolicy,
+    /// Output filename template. Supports `{author}`, `{post_id}`, `{quality}`.
+    pub filename_template: Option<String>,
     /// Download the post's music track in addition to video/photos.
     ///
     /// Music is fetched through the normal ALPN Auto transport; H1-only audio
@@ -64,6 +66,8 @@ pub struct YsttConfig {
     pub cache_ttl: Duration,
     /// Reuse an existing output file without a network request.
     pub reuse_existing: bool,
+    /// Resume a video from a deterministic `.part` file after interruption.
+    pub resume: bool,
     /// Enable the content-addressed file cache.
     pub file_cache: bool,
     /// Optional shared cache root for file and metadata caches.
@@ -108,6 +112,7 @@ impl Default for YsttConfig {
         Self {
             output_dir: PathBuf::from("downloads"),
             quality: QualityPolicy::default(),
+            filename_template: None,
             include_audio: false,
             parallel_ranges: true,
             max_connections: 6,
@@ -118,6 +123,7 @@ impl Default for YsttConfig {
             waf: WafSolverConfig::default(),
             cache_ttl: Duration::from_secs(10 * 60),
             reuse_existing: false,
+            resume: false,
             file_cache: true,
             cache_dir: None,
             file_cache_dir: None,
@@ -145,6 +151,8 @@ pub struct DownloadOptions {
     pub output_dir: Option<PathBuf>,
     /// Quality policy override.
     pub quality: Option<QualityPolicy>,
+    /// Output filename template override.
+    pub filename_template: Option<String>,
     /// Include the music track.
     pub include_audio: Option<bool>,
     /// Enable or disable range-first downloads.
@@ -157,6 +165,8 @@ pub struct DownloadOptions {
     pub max_bytes: Option<u64>,
     /// Reuse an existing file.
     pub reuse_existing: Option<bool>,
+    /// Resume a video from a deterministic `.part` file.
+    pub resume: Option<bool>,
     /// Enable or disable the file cache.
     pub file_cache: Option<bool>,
     /// Enable or disable the persistent metadata cache.
@@ -179,12 +189,14 @@ impl std::fmt::Debug for DownloadOptions {
             .debug_struct("DownloadOptions")
             .field("output_dir", &self.output_dir)
             .field("quality", &self.quality)
+            .field("filename_template", &self.filename_template)
             .field("include_audio", &self.include_audio)
             .field("parallel_ranges", &self.parallel_ranges)
             .field("max_connections", &self.max_connections)
             .field("photo_concurrency", &self.photo_concurrency)
             .field("max_bytes", &self.max_bytes)
             .field("reuse_existing", &self.reuse_existing)
+            .field("resume", &self.resume)
             .field("file_cache", &self.file_cache)
             .field("metadata_cache", &self.metadata_cache)
             .field("media_retries", &self.media_retries)
@@ -211,6 +223,12 @@ impl DownloadOptions {
     /// Set the quality policy.
     pub fn quality(mut self, quality: QualityPolicy) -> Self {
         self.quality = Some(quality);
+        self
+    }
+
+    /// Set the output filename template.
+    pub fn filename_template(mut self, template: impl Into<String>) -> Self {
+        self.filename_template = Some(template.into());
         self
     }
 
@@ -247,6 +265,12 @@ impl DownloadOptions {
     /// Reuse an existing file.
     pub fn reuse_existing(mut self, reuse: bool) -> Self {
         self.reuse_existing = Some(reuse);
+        self
+    }
+
+    /// Enable or disable resumable video downloads.
+    pub fn resume(mut self, enabled: bool) -> Self {
+        self.resume = Some(enabled);
         self
     }
 

@@ -33,4 +33,5 @@ pub use plan::{ByteRange, RangePlan, RangePlanner};
 pub use progress::{
     MediaTarget, ProgressEvent, ProgressReporter, ProgressSink, ProgressStage, progress_channel,
 };
+pub use tokio_util::sync::CancellationToken;
 pub use url::{TikTokUrl, find_post_id_in_html, get_post_id};

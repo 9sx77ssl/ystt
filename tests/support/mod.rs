@@ -220,7 +220,7 @@ async fn serve_video(
     }
 }
 
-fn video_body() -> Vec<u8> {
+pub fn video_body() -> Vec<u8> {
     let mut body = vec![0u8; VIDEO_SIZE];
     body[4..8].copy_from_slice(b"ftyp");
     for (index, byte) in body.iter_mut().enumerate().skip(8) {

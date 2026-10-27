@@ -10,7 +10,8 @@ mod support;
 use std::sync::atomic::Ordering;
 
 use ystt::{
-    BatchOptions, DownloadOptions, MediaKind, ProgressStage, Ystt, YsttError, progress_channel,
+    BatchOptions, CancellationToken, DownloadOptions, MediaKind, ProgressStage, Ystt, YsttError,
+    progress_channel,
 };
 
 fn video_url() -> &'static str {
@@ -110,6 +111,67 @@ async fn video_ranges_cookies_progress_and_file_cache() {
         .unwrap();
     assert!(cached.cache_hit);
     assert_eq!(server.counters.total.load(Ordering::Relaxed), before);
+}
+
+#[tokio::test]
+async fn video_resume_appends_from_part_file() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    let path = dir.path().join("tiktok_test_123.mp4");
+    let part = dir.path().join(".tiktok_test_123.mp4.part");
+    let body = support::video_body();
+    tokio::fs::write(&part, &body[..1000]).await.unwrap();
+
+    let result = ystt
+        .download_with(
+            video_url(),
+            DownloadOptions::new().output_dir(dir.path()).resume(true),
+        )
+        .await
+        .unwrap();
+    let video = result.video.expect("video");
+    assert_eq!(video.size as usize, support::VIDEO_SIZE);
+    assert_eq!(tokio::fs::read(&video.path).await.unwrap(), body);
+    assert!(!part.exists());
+    assert!(!path.with_file_name("tiktok_test_123.mp4.part").exists());
+}
+
+#[tokio::test]
+async fn filename_template_is_used() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    let result = ystt
+        .download_with(
+            video_url(),
+            DownloadOptions::new()
+                .output_dir(dir.path())
+                .filename_template("{author}-{post_id}-{quality}"),
+        )
+        .await
+        .unwrap();
+    let name = result
+        .video
+        .unwrap()
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(name, "test-123-balanced.mp4");
 }
 
 #[tokio::test]
@@ -295,6 +357,76 @@ async fn batch_preserves_order_and_reports_errors() {
         Some("unavailable")
     );
     assert_eq!(batch.items[2].url, video_url_two());
+}
+
+#[tokio::test]
+async fn concurrent_downloads_share_one_file_cache_lock() {
+    let server = support::start().await;
+    let cache = tempfile::tempdir().unwrap();
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let build = |dir: &std::path::Path| {
+        Ystt::builder()
+            .output_dir(dir)
+            .page_origin(server.origin.clone())
+            .cache_dir(cache.path())
+            .metadata_cache(false)
+            .build()
+            .unwrap()
+    };
+    let first = build(first_dir.path());
+    let second = build(second_dir.path());
+    let (a, b) = tokio::join!(
+        first.download_with(
+            video_url(),
+            DownloadOptions::new().output_dir(first_dir.path())
+        ),
+        second.download_with(
+            video_url(),
+            DownloadOptions::new().output_dir(second_dir.path())
+        )
+    );
+    assert!(a.is_ok());
+    assert!(b.is_ok());
+    assert_eq!(
+        server.counters.pages.load(Ordering::Relaxed),
+        1,
+        "the lock must prevent duplicate page work"
+    );
+    assert_eq!(
+        server.counters.media.load(Ordering::Relaxed),
+        1,
+        "the lock must prevent duplicate media work"
+    );
+    assert!(a.unwrap().cache_hit || b.unwrap().cache_hit);
+}
+
+#[tokio::test]
+async fn batch_item_cancellation_does_not_cancel_other_items() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let batch = ystt
+        .download_many(
+            [video_url(), video_url_two()],
+            BatchOptions::new()
+                .output_dir(dir.path())
+                .item_signal(1, cancelled),
+        )
+        .await;
+    assert!(batch.items[0].result.is_some());
+    assert_eq!(
+        batch.items[1].error.as_ref().map(|error| error.code),
+        Some("cancelled")
+    );
 }
 
 #[tokio::test]

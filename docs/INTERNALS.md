@@ -9,6 +9,8 @@ performance and decisions. The user-facing API is in `GUIDE.md`.
 ystt-waf   (no ystt deps)   challenge parsing + parallel SHA-256 solver
 ystt-net   (no ystt deps)   wreq client, emulation, retries, rate limits
 ystt-core  (net + waf)      URL/model/parser/media/caches/progress/pipeline
+  download/{types,batch,builder} and media/{ext,validation} are split from the
+  facade modules; transport and cache helpers are independent modules.
 ystt-cli   (core)           minimal clap front-end
 ystt       (root)           public facade + offline/integration tests
 ```
@@ -159,6 +161,7 @@ hard safety bound (default 2,000,000).
 - retries only for GET/HEAD; statuses 408, 425, 429, 500, 502, 503, 504;
 - exponential backoff + jitter, `Retry-After` capped by max delay;
 - per-host page limit: 2 concurrent, 120 ms spacing; media is not rate-limited;
+- host limiter state is capped at 256 hosts;
 - timeouts: 20 s request, 10 s connect, 60 s body idle, 90 s pool idle;
 - at most 8 idle pooled connections per host;
 - `no_proxy` is enabled by default.
@@ -280,6 +283,8 @@ validation.
 - BLAKE3 hashes the finished file (spawn_blocking);
 - objects are copied, not hardlinked, so editing an output cannot corrupt cache;
 - manifests are written atomically (`.tmp` + rename);
+- `locks/<key>.lock` serialises the whole job across processes; stale locks
+  are reclaimed after 30 minutes;
 - `get` verifies every object exists and has the recorded size;
 - TTL is 24 h by default; expired manifests are removed;
 - `prune` removes stale manifests and unreferenced objects;

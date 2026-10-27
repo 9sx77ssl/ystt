@@ -5,16 +5,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
-use http::header::{ACCEPT_RANGES, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED};
+use http::header::{
+    ACCEPT_RANGES, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
+};
 use serde::{Deserialize, Serialize};
-use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::fs::{self, OpenOptions};
+use tokio::io::{AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use ystt_net::{BrowserHeaders, HttpClient, HttpResponse, NetError, RequestKind, RequestOptions};
 
 use crate::error::{Result, YsttError};
+mod ext;
+mod validation;
+
+pub use ext::sanitize_filename;
+pub(crate) use ext::{audio_ext, base_filename, mime_for_ext, photo_ext, video_ext};
+pub(crate) use validation::validate_download;
+#[cfg(test)]
+pub(crate) use validation::{is_jpeg, is_mp4, is_png, is_webm, is_webp};
+
 use crate::model::{MediaKind, is_https_url};
 use crate::plan::{AdaptiveRangeController, ByteRange, RangePlanner};
 use crate::progress::{MediaTarget, ProgressEmitter, ProgressTracker};
@@ -53,6 +64,7 @@ pub(crate) struct MediaContext<'a> {
     pub min_chunk: u64,
     pub range_threshold: u64,
     pub reuse_existing: bool,
+    pub resume: bool,
     pub media_retries: u32,
     pub progress: Option<ProgressEmitter>,
     pub adaptive_ranges: bool,
@@ -91,6 +103,9 @@ pub(crate) async fn download_media(
         .map(|emitter| ProgressTracker::new(emitter, target, None));
 
     let size = match kind {
+        MediaKind::Video if context.resume => {
+            download_resume(context, url, path, target, tracker.clone()).await?
+        }
         MediaKind::Video if context.parallel_ranges => {
             match download_adaptive(context, url, path, tracker.clone()).await {
                 Ok(size) => size,
@@ -118,6 +133,115 @@ fn should_fallback(error: &YsttError) -> bool {
             | YsttError::Parse(_)
             | YsttError::Unavailable(_)
     )
+}
+
+async fn download_resume(
+    context: &MediaContext<'_>,
+    url: &str,
+    path: &Path,
+    target: MediaTarget,
+    tracker: Option<std::sync::Arc<ProgressTracker>>,
+) -> Result<u64> {
+    let part = resume_part_path(path);
+    let offset = fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
+    let mut headers = BrowserHeaders::build(
+        request_kind(target.kind),
+        Some(context.referer),
+        context.cookie,
+        None,
+    )?;
+    if offset > 0 {
+        let value = HeaderValue::from_str(&format!("bytes={offset}-"))
+            .map_err(|error| YsttError::Range(format!("invalid range header: {error}")))?;
+        headers.insert(RANGE, value);
+    }
+    let request_started = Instant::now();
+    let response = context
+        .client
+        .get(
+            url,
+            headers,
+            media_options(context.signal, context.media_retries),
+        )
+        .await?;
+    let status = response.status_u16();
+    if offset > 0 && status == 206 {
+        let content_range = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range);
+        let Some((start, _end, Some(total))) = content_range else {
+            remove_quietly(&part).await;
+            return Err(YsttError::Range(
+                "resume response has no usable Content-Range".into(),
+            ));
+        };
+        if start != offset || total > context.max_bytes {
+            remove_quietly(&part).await;
+            return Err(YsttError::Range(format!(
+                "unexpected resume range start={start} offset={offset} total={total}"
+            )));
+        }
+        if let Some(tracker) = &tracker {
+            tracker.set_total(total);
+            tracker.add(offset);
+        }
+        let file = OpenOptions::new().append(true).open(&part).await?;
+        let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+        let written = match write_stream(
+            response,
+            &mut writer,
+            context.read_timeout,
+            context.signal,
+            total,
+            tracker.as_deref(),
+        )
+        .await
+        {
+            Ok(written) => written,
+            Err(error) => {
+                drop(writer);
+                return Err(error);
+            }
+        };
+        drop(writer);
+        if offset.saturating_add(written) != total {
+            return Err(YsttError::Range(format!(
+                "resume wrote {} of {} bytes",
+                offset.saturating_add(written),
+                total
+            )));
+        }
+        if let Err(error) = validate_download(&part, target.kind).await {
+            remove_quietly(&part).await;
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&part, path).await {
+            remove_quietly(&part).await;
+            return Err(error.into());
+        }
+        debug!(
+            bytes = total,
+            offset,
+            headers_ms = request_started.elapsed().as_millis() as u64,
+            "resumed media transfer"
+        );
+        return Ok(total);
+    }
+    if !response.is_success() {
+        return Err(media_status_error(&response));
+    }
+    // A server that ignores Range returns 200; restart cleanly.
+    write_response_to_temp(
+        context,
+        response,
+        &part,
+        path,
+        target.kind,
+        tracker.as_deref(),
+    )
+    .await
 }
 
 async fn download_single(
@@ -542,6 +666,18 @@ async fn write_response_to_path(
     kind: MediaKind,
     tracker: Option<&ProgressTracker>,
 ) -> Result<u64> {
+    let temp = temp_path(path);
+    write_response_to_temp(context, response, &temp, path, kind, tracker).await
+}
+
+async fn write_response_to_temp(
+    context: &MediaContext<'_>,
+    response: HttpResponse,
+    temp: &Path,
+    path: &Path,
+    kind: MediaKind,
+    tracker: Option<&ProgressTracker>,
+) -> Result<u64> {
     if let Some(length) = response.content_length()
         && length > context.max_bytes
     {
@@ -556,12 +692,11 @@ async fn write_response_to_path(
         tracker.set_total(length);
     }
 
-    let temp = temp_path(path);
     let file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(&temp)
+        .open(temp)
         .await?;
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
 
@@ -578,24 +713,24 @@ async fn write_response_to_path(
         Ok(written) => written,
         Err(error) => {
             drop(writer);
-            remove_quietly(&temp).await;
+            remove_quietly(temp).await;
             return Err(error);
         }
     };
     drop(writer);
 
     if written == 0 {
-        remove_quietly(&temp).await;
+        remove_quietly(temp).await;
         return Err(YsttError::Parse("empty media body".into()));
     }
 
-    if let Err(error) = validate_download(&temp, kind).await {
-        remove_quietly(&temp).await;
+    if let Err(error) = validate_download(temp, kind).await {
+        remove_quietly(temp).await;
         return Err(error);
     }
 
-    if let Err(error) = fs::rename(&temp, path).await {
-        remove_quietly(&temp).await;
+    if let Err(error) = fs::rename(temp, path).await {
+        remove_quietly(temp).await;
         return Err(error.into());
     }
 
@@ -728,6 +863,14 @@ fn header_string(response: &HttpResponse, name: http::header::HeaderName) -> Opt
         .map(str::to_owned)
 }
 
+fn resume_part_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "media".into());
+    path.with_file_name(format!(".{name}.part"))
+}
+
 fn temp_path(path: &Path) -> PathBuf {
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -750,81 +893,6 @@ async fn remove_quietly(path: &Path) {
     let _ = fs::remove_file(path).await;
 }
 
-async fn validate_download(path: &Path, kind: MediaKind) -> Result<()> {
-    let mut file = File::open(path).await?;
-    let mut head = [0u8; 16];
-    let read = file.read(&mut head).await?;
-    let head = &head[..read];
-
-    if head.is_empty() {
-        return Err(YsttError::Parse("empty media file".into()));
-    }
-    if head[0] == b'<'
-        || head.starts_with(b"<!DOCTYPE")
-        || head.starts_with(b"<html")
-        || head.starts_with(b"<HTML")
-    {
-        return Err(YsttError::Parse(
-            "server returned an HTML page instead of media".into(),
-        ));
-    }
-
-    let valid = match kind {
-        MediaKind::Video => is_mp4(head) || is_webm(head) || is_riff_avi(head),
-        MediaKind::Photo => is_jpeg(head) || is_png(head) || is_webp(head) || is_gif(head),
-        MediaKind::Audio => is_mp3(head) || is_mp4(head) || is_ogg(head) || is_wav(head),
-    };
-
-    if !valid {
-        return Err(YsttError::Parse(format!(
-            "media signature mismatch for {}",
-            kind.as_str()
-        )));
-    }
-
-    Ok(())
-}
-
-fn is_mp4(head: &[u8]) -> bool {
-    head.len() >= 8 && &head[4..8] == b"ftyp"
-}
-
-fn is_webm(head: &[u8]) -> bool {
-    head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
-}
-
-fn is_riff_avi(head: &[u8]) -> bool {
-    head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"AVI "
-}
-
-fn is_jpeg(head: &[u8]) -> bool {
-    head.starts_with(&[0xFF, 0xD8, 0xFF])
-}
-
-fn is_png(head: &[u8]) -> bool {
-    head.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
-}
-
-fn is_webp(head: &[u8]) -> bool {
-    head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP"
-}
-
-fn is_gif(head: &[u8]) -> bool {
-    head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a")
-}
-
-fn is_mp3(head: &[u8]) -> bool {
-    head.starts_with(b"ID3") || (head.len() >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0)
-}
-
-fn is_ogg(head: &[u8]) -> bool {
-    head.starts_with(b"OggS")
-}
-
-fn is_wav(head: &[u8]) -> bool {
-    head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WAVE"
-}
-
 /// Parse `Content-Range: bytes 0-1023/2048`.
 pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
     let rest = value.trim().strip_prefix("bytes ")?;
@@ -838,146 +906,6 @@ pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)
         Some(total.trim().parse().ok()?)
     };
     Some((start, end, total))
-}
-
-/// Lowercase extension from a URL path, if it is safe.
-pub(crate) fn ext_from_url(url: &str, fallback: &str) -> String {
-    let Ok(url) = url::Url::parse(url) else {
-        return fallback.to_owned();
-    };
-    let Some(segment) = url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-    else {
-        return fallback.to_owned();
-    };
-    let Some((_, ext)) = segment.rsplit_once('.') else {
-        return fallback.to_owned();
-    };
-    let ext = ext.to_ascii_lowercase();
-    if !ext.is_empty()
-        && ext
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-    {
-        ext
-    } else {
-        fallback.to_owned()
-    }
-}
-
-/// Extension for a video URL.
-pub(crate) fn video_ext(url: &str) -> String {
-    match ext_from_url(url, "mp4").as_str() {
-        "mp4" | "webm" | "mov" | "m4v" => ext_from_url(url, "mp4"),
-        _ => "mp4".into(),
-    }
-}
-
-/// Extension for a photo URL.
-pub(crate) fn photo_ext(url: &str) -> String {
-    match ext_from_url(url, "jpg").as_str() {
-        "png" => "png".into(),
-        "webp" => "webp".into(),
-        "gif" => "gif".into(),
-        "jpeg" | "jpg" => "jpg".into(),
-        _ => "jpg".into(),
-    }
-}
-
-/// Extension for an audio URL.
-pub(crate) fn audio_ext(url: &str) -> String {
-    match ext_from_url(url, "mp3").as_str() {
-        "mp3" | "m4a" | "aac" | "ogg" | "opus" => ext_from_url(url, "mp3"),
-        _ => "mp3".into(),
-    }
-}
-
-/// MIME type for an extension and media kind.
-pub(crate) fn mime_for_ext(ext: &str, kind: MediaKind) -> String {
-    let mime = match ext {
-        "mp4" | "m4v" => "video/mp4",
-        "webm" => "video/webm",
-        "mov" => "video/quicktime",
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "mp3" => "audio/mpeg",
-        "m4a" | "aac" => "audio/mp4",
-        "ogg" | "opus" => "audio/ogg",
-        "wav" => "audio/wav",
-        _ => match kind {
-            MediaKind::Video => "video/mp4",
-            MediaKind::Photo => "image/jpeg",
-            MediaKind::Audio => "audio/mpeg",
-        },
-    };
-    mime.to_owned()
-}
-
-/// Sanitize a generated filename for all supported operating systems.
-pub fn sanitize_filename(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character.is_control()
-            || matches!(
-                character,
-                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
-            )
-        {
-            sanitized.push('_');
-        } else {
-            sanitized.push(character);
-        }
-    }
-
-    let sanitized = sanitized.trim().trim_matches('.').trim();
-    let mut sanitized = if sanitized.is_empty() {
-        "tiktok".to_owned()
-    } else {
-        sanitized.chars().take(180).collect()
-    };
-
-    let base = sanitized
-        .split('.')
-        .next()
-        .unwrap_or("tiktok")
-        .to_ascii_uppercase();
-    if matches!(
-        base.as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    ) {
-        sanitized.insert(0, '_');
-    }
-
-    sanitized
-}
-
-/// Base filename shared by all files of one post.
-pub(crate) fn base_filename(author_id: &str, post_id: &str) -> String {
-    sanitize_filename(&format!("tiktok_{author_id}_{post_id}"))
 }
 
 impl DownloadedFile {
@@ -1031,6 +959,19 @@ mod tests {
         assert_eq!(sanitize_filename(".."), "tiktok");
         assert_eq!(sanitize_filename("CON"), "_CON");
         assert!(sanitize_filename(&"x".repeat(400)).len() <= 180);
+    }
+
+    #[test]
+    fn filename_template_renders_and_sanitizes() {
+        assert_eq!(
+            base_filename(Some("{author}-{post_id}-{quality}"), "u", "123", "best"),
+            "u-123-best"
+        );
+        assert_eq!(
+            base_filename(Some("../../{post_id}"), "u", "123", "best"),
+            "_.._123"
+        );
+        assert_eq!(base_filename(None, "u", "123", "balanced"), "tiktok_u_123");
     }
 
     #[test]

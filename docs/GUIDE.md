@@ -14,8 +14,10 @@ galleries. The Rust library is the primary product; the CLI is deliberately smal
 - one-request `200` fast path for videos up to 64 MiB;
 - content-addressed file cache (BLAKE3) with TTL and atomic manifests;
 - persistent metadata/signed-URL cache across processes;
-- batch API with bounded concurrency;
+- batch API with bounded concurrency and per-item cancellation;
 - shared cache root across output directories;
+- cross-process file-cache locks;
+- resumable videos and filename templates;
 - unified progress for downloads, resolve calls and batches;
 - optional HTTP/2 connection/keep-alive tuning without changing TLS/JA3/JA4;
 - progress events through a callback, channel or custom sink;
@@ -79,6 +81,8 @@ ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
            [--audio] [--no-cache] [--cache-dir DIR]
 ystt --urls-file FILE [--concurrency N] [same download flags]
 ystt --progress URL
+ystt --filename "{author}-{post_id}-{quality}" URL
+ystt --resume URL
 ```
 
 Defaults:
@@ -94,9 +98,13 @@ Defaults:
 - `--no-cache` disables both file and metadata caches for one call.
 - `--cache-dir` shares file and metadata caches across output directories.
 - `--json` writes `ErrorInfo` JSON to stderr when a command fails.
-- `--urls-file` runs a batch from one URL per line (`#` comments and blank lines ignored).
+- `--urls-file` runs a batch from one URL per line (`#` comments and blank lines ignored; max 10,000 URLs / 8 MiB).
 - `--concurrency` controls batch concurrency (default 4, capped at 64).
 - `--progress` writes one `ProgressEvent` JSON object per line to stderr.
+- `--filename` sets the filename base; placeholders: `{author}`, `{post_id}`,
+  `{quality}`. Path separators are sanitized.
+- `--resume` continues a video from `.<name>.part` using a range request. It
+  uses one resumable stream; adaptive range parallelism is skipped while enabled.
 
 ## Library
 
@@ -177,8 +185,17 @@ for item in batch.items {
 Results preserve input order. Each item has either `result` or a stable
 `ErrorInfo`; one failed URL does not cancel the remaining batch. `BatchOptions`
 accepts `output_dir`, `quality`, `include_audio`, `file_cache`,
-`metadata_cache`, `allow_partial` and a cancellation token. Concurrency defaults
-to 4 and is capped at 64.
+`metadata_cache`, `allow_partial`, a shared cancellation token and per-item
+cancellation tokens. Concurrency defaults to 4 and is capped at 64.
+
+```rust
+let token = CancellationToken::new();
+token.cancel();
+let batch = ystt
+    .download_many(urls, BatchOptions::new().item_signal(2, token))
+    .await;
+// only item 2 is cancelled
+```
 
 ## HTTP/2 tuning
 
@@ -336,6 +353,8 @@ With a shared cache root (`.cache_dir(...)` or `--cache-dir`):
 - metadata entries expire after `metadata_cache_ttl`, capped by signed-URL expiry;
 - metadata hits skip the TikTok page and reload the filtered media session cookies;
 - failed/partial galleries are not cached;
+- a per-key lock in `locks/` serialises concurrent processes for the same post;
+  stale locks are reclaimed after 30 minutes;
 - `Ystt::prune_file_cache()` removes stale manifests and unreferenced objects;
 - `Ystt::prune_metadata_cache()` removes expired/malformed metadata;
 - `Ystt::clear_file_cache()` and `clear_metadata_cache()` remove everything;

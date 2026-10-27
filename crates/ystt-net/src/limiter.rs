@@ -12,6 +12,7 @@ use crate::NetError;
 struct HostState {
     semaphore: Arc<Semaphore>,
     next_start: Mutex<Instant>,
+    created: Instant,
 }
 
 /// Limits page requests per host without throttling media CDN transfers.
@@ -19,6 +20,7 @@ struct HostState {
 pub(crate) struct HostLimiter {
     concurrency: usize,
     interval: Duration,
+    max_hosts: usize,
     hosts: Mutex<HashMap<String, Arc<HostState>>>,
 }
 
@@ -27,6 +29,7 @@ impl HostLimiter {
         Self {
             concurrency: concurrency.max(1),
             interval,
+            max_hosts: 256,
             hosts: Mutex::new(HashMap::new()),
         }
     }
@@ -38,12 +41,22 @@ impl HostLimiter {
                 .hosts
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !hosts.contains_key(host)
+                && hosts.len() >= self.max_hosts
+                && let Some(key) = hosts
+                    .iter()
+                    .min_by_key(|(_, state)| state.created)
+                    .map(|(key, _)| key.clone())
+            {
+                hosts.remove(&key);
+            }
             hosts
                 .entry(host.to_owned())
                 .or_insert_with(|| {
                     Arc::new(HostState {
                         semaphore: Arc::new(Semaphore::new(self.concurrency)),
                         next_start: Mutex::new(Instant::now()),
+                        created: Instant::now(),
                     })
                 })
                 .clone()
@@ -85,6 +98,23 @@ mod tests {
         let first = limiter.acquire("example.com").await.unwrap();
         drop(first);
         let _second = limiter.acquire("example.com").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_map_is_bounded() {
+        let limiter = HostLimiter::new(1, Duration::ZERO);
+        for index in 0..300 {
+            let permit = limiter
+                .acquire(&format!("{index}.example.test"))
+                .await
+                .unwrap();
+            drop(permit);
+        }
+        let hosts = limiter
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(hosts.len() <= 256);
     }
 
     #[tokio::test]

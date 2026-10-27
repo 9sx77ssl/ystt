@@ -53,9 +53,17 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = QualityArg::Balanced)]
     quality: QualityArg,
 
+    /// Output filename template: {author}, {post_id}, {quality}.
+    #[arg(long, value_name = "TEMPLATE")]
+    filename: Option<String>,
+
     /// Download the post's music track too.
     #[arg(long)]
     audio: bool,
+
+    /// Resume interrupted videos from `.part` files.
+    #[arg(long)]
+    resume: bool,
 
     /// Do not use the content-addressed file cache or metadata cache.
     #[arg(long)]
@@ -109,18 +117,26 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
         .output_dir(&cli.output)
         .quality(cli.quality.into())
         .include_audio(cli.audio)
+        .resume(cli.resume)
         .file_cache(!cli.no_cache)
         .metadata_cache(!cli.no_cache);
     if let Some(cache_dir) = &cli.cache_dir {
         builder = builder.cache_dir(cache_dir);
+    }
+    if let Some(template) = &cli.filename {
+        builder = builder.filename_template(template);
     }
     let ystt = builder.build()?;
 
     let reporter = cli_reporter(cli.progress);
     let mut options = DownloadOptions::new()
         .output_dir(&cli.output)
+        .resume(cli.resume)
         .file_cache(!cli.no_cache)
         .metadata_cache(!cli.no_cache);
+    if let Some(template) = &cli.filename {
+        options = options.filename_template(template);
+    }
     if let Some(reporter) = reporter.clone() {
         options = options.progress(reporter);
     }
@@ -131,9 +147,13 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
             .output_dir(&cli.output)
             .quality(cli.quality.into())
             .include_audio(cli.audio)
+            .resume(cli.resume)
             .file_cache(!cli.no_cache)
             .metadata_cache(!cli.no_cache)
             .concurrency(cli.concurrency);
+        if let Some(template) = &cli.filename {
+            batch_options = batch_options.filename_template(template);
+        }
         if let Some(reporter) = reporter {
             batch_options = batch_options.progress(reporter);
         }
@@ -170,10 +190,23 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
 }
 
 fn read_urls_file(path: &std::path::Path) -> Result<Vec<String>, YsttError> {
+    const MAX_URL_FILE_BYTES: u64 = 8 * 1024 * 1024;
+    const MAX_URLS: usize = 10_000;
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_URL_FILE_BYTES {
+        return Err(YsttError::Config(format!(
+            "URL file is larger than {MAX_URL_FILE_BYTES} bytes"
+        )));
+    }
     let text = std::fs::read_to_string(path)?;
     let urls = parse_urls(&text);
     if urls.is_empty() {
         return Err(YsttError::Config("URL file is empty".into()));
+    }
+    if urls.len() > MAX_URLS {
+        return Err(YsttError::Config(format!(
+            "URL file contains more than {MAX_URLS} URLs"
+        )));
     }
     Ok(urls)
 }
