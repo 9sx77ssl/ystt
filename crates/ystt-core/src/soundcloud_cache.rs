@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::warn;
 
+use crate::cache_util::{acquire_lock, temp_sibling};
 use crate::config::QualityPolicy;
 use crate::error::{Result, YsttError};
 use crate::soundcloud::{SoundCloudArtwork, SoundCloudAudio, SoundCloudTrack};
@@ -104,6 +105,7 @@ impl SoundCloudCache {
     /// the CLI can log them without failing the actual download.
     pub async fn put(&self, audio: &SoundCloudAudio, quality: QualityPolicy) -> Result<()> {
         let key = cache_key(&audio.track.id, quality);
+        let _lock = acquire_lock(&self.root.join("locks").join(format!("{key}.lock"))).await?;
         let objects = self.root.join("objects");
         let manifests = self.root.join("manifests");
         fs::create_dir_all(&objects).await?;
@@ -221,13 +223,7 @@ async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .ok_or_else(|| YsttError::Internal("cache path has no parent".into()))?;
     fs::create_dir_all(parent).await?;
-    let temp = path.with_extension(format!(
-        "{}.tmp-{}",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("tmp"),
-        std::process::id()
-    ));
+    let temp = temp_sibling(path);
     fs::write(&temp, bytes).await?;
     fs::rename(&temp, path).await?;
     Ok(())
