@@ -65,8 +65,6 @@ Important core modules:
   resume paths;
 - `soundcloud.rs` — public `client_id`, resolve, playlist hydration, transcoding
   selection, HLS segment parsing/assembly and native audio transfer;
-- `media/transfer.rs` — single stream, resume, adaptive ranges, in-memory
-  ranges;
 - `api/src/downloader.rs` — API result cache and media descriptors;
 - `api/src/store.rs` — bounded RAM media store;
 - `api/src/openapi.rs` — generated schema.
@@ -188,8 +186,9 @@ shared, but a new CLI flag or HTTP route is never assumed to appear by magic.
 - API: no key -> 401, valid key -> 200, invalid JSON -> 400, oversized body ->
   413, media Range -> 206/416, OpenAPI security scheme present.
 - Nginx: `nginx -t`, TLS 1.3, HTTP/2, rate limit.
-- Deploy with atomic binary replacement; never overwrite a running executable
-  in place.
+- Deploy new binaries with `rsync` to a sibling `.new` path, then `mv` into
+  place and restart systemd; never overwrite a running executable in place.
+  Use `rsync` rather than `scp` for all version transfers.
 
 ## Deployment
 
