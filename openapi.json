@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.5.1"
+    "version": "0.6.0"
   },
   "servers": [
     {
@@ -588,6 +588,24 @@
                 "description": "Per-item concurrency (server-capped).",
                 "minimum": 0
               },
+              "item_retries": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Optional media retry override for each item.",
+                "minimum": 0
+              },
+              "item_timeout_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Optional wall-clock timeout for each item, in milliseconds.",
+                "minimum": 0
+              },
               "urls": {
                 "type": "array",
                 "items": {
@@ -925,9 +943,69 @@
             "type": "string",
             "description": "Stable machine-readable error code."
           },
+          "context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ErrorContext",
+                "description": "Optional non-secret diagnostic context."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "message": {
             "type": "string",
             "description": "Human-readable message."
+          }
+        }
+      },
+      "ErrorContext": {
+        "type": "object",
+        "description": "Non-secret context attached to an error for debugging and JSON APIs.",
+        "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Attempt number, when known.",
+            "minimum": 0
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Host that failed, when known."
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MediaKind",
+                "description": "Media kind, when known."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provider guessed from the failed URL."
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "HTTP status, when known.",
+            "minimum": 0
           }
         }
       },
@@ -1460,6 +1538,7 @@
           "best",
           "compatible",
           "balanced",
+          "efficient",
           "fast"
         ]
       },

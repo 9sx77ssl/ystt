@@ -9,6 +9,7 @@ use futures_util::{StreamExt, stream};
 use http::header::{
     ACCEPT_RANGES, CONTENT_RANGE, ETAG, HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
 };
+use serde::{Deserialize, Serialize};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::task::JoinSet;
@@ -16,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use ystt_net::{BrowserHeaders, HttpClient, HttpResponse, NetError, RequestKind, RequestOptions};
 
+use crate::cache_util::temp_sibling;
 use crate::error::{Result, YsttError};
 use crate::model::MediaKind;
 use crate::plan::{AdaptiveRangeController, ByteRange, RangePlanner};
@@ -25,6 +27,40 @@ use super::MediaContext;
 use super::validation::{validate_bytes, validate_download};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RangeCheckpoint {
+    total: u64,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    completed: Vec<ByteRange>,
+    created_unix: u64,
+}
+
+struct RangeResumeState<'a> {
+    path: &'a Path,
+    total: u64,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    completed: Vec<ByteRange>,
+}
+
+impl RangeResumeState<'_> {
+    async fn save(&self) -> Result<()> {
+        let checkpoint = RangeCheckpoint {
+            total: self.total,
+            etag: self.etag.clone(),
+            last_modified: self.last_modified.clone(),
+            completed: self.completed.clone(),
+            created_unix: unix_now(),
+        };
+        let bytes = serde_json::to_vec(&checkpoint)?;
+        let temp = temp_sibling(self.path);
+        fs::write(&temp, bytes).await?;
+        fs::rename(&temp, self.path).await?;
+        Ok(())
+    }
+}
 
 pub(crate) fn should_fallback(error: &YsttError) -> bool {
     matches!(
@@ -581,11 +617,35 @@ pub(crate) async fn download_adaptive(
     let total = total.unwrap_or(0);
     let etag = header_string(&response, ETAG);
     let last_modified = header_string(&response, LAST_MODIFIED);
-    let temp = temp_path(path);
+    let resume = context.resume;
+    let temp = if resume {
+        adaptive_part_path(path)
+    } else {
+        temp_path(path)
+    };
+    let checkpoint_path = adaptive_checkpoint_path(path);
+    let mut completed = Vec::new();
+    let mut reused = false;
+    if resume
+        && let Some(checkpoint) = load_checkpoint(&checkpoint_path).await
+        && checkpoint.total == total
+        && checkpoint.etag == etag
+        && checkpoint.last_modified == last_modified
+        && fs::metadata(&temp)
+            .await
+            .map(|metadata| metadata.len() == total)
+            .unwrap_or(false)
+    {
+        completed = checkpoint.completed;
+        reused = true;
+    } else {
+        remove_quietly(&temp).await;
+        remove_quietly(&checkpoint_path).await;
+    }
     let file = OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
+        .truncate(!reused)
         .open(&temp)
         .await?;
     file.set_len(total).await?;
@@ -593,25 +653,58 @@ pub(crate) async fn download_adaptive(
         tracker.set_total(total);
     }
 
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let prefix = write_stream_prefix(
-        response,
-        &mut writer,
-        context.read_timeout,
-        context.signal,
-        context.first_chunk,
-        tracker.as_deref(),
-    )
-    .await;
-    let prefix = match prefix {
-        Ok(prefix) => prefix,
-        Err(error) => {
-            drop(writer);
-            remove_quietly(&temp).await;
-            return Err(error);
+    let prefix_range = ByteRange {
+        start: 0,
+        end: context
+            .first_chunk
+            .saturating_sub(1)
+            .min(total.saturating_sub(1)),
+    };
+    let prefix_done = covers(&completed, prefix_range);
+    let mut state = RangeResumeState {
+        path: &checkpoint_path,
+        total,
+        etag,
+        last_modified,
+        completed,
+    };
+    let prefix = if prefix_done {
+        context.first_chunk.min(total)
+    } else {
+        let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+        let prefix = write_stream_prefix(
+            response,
+            &mut writer,
+            context.read_timeout,
+            context.signal,
+            context.first_chunk,
+            tracker.as_deref(),
+        )
+        .await;
+        drop(writer);
+        match prefix {
+            Ok(prefix) => {
+                if prefix > 0 {
+                    state.completed.push(ByteRange {
+                        start: 0,
+                        end: prefix - 1,
+                    });
+                    if resume {
+                        state.save().await?;
+                    }
+                }
+                prefix
+            }
+            Err(error) => {
+                if resume {
+                    let _ = state.save().await;
+                } else {
+                    remove_quietly(&temp).await;
+                }
+                return Err(error);
+            }
         }
     };
-    drop(writer);
 
     if prefix < context.first_chunk {
         if prefix == total {
@@ -623,9 +716,14 @@ pub(crate) async fn download_adaptive(
                 remove_quietly(&temp).await;
                 return Err(error.into());
             }
+            if resume {
+                remove_quietly(&checkpoint_path).await;
+            }
             return Ok(total);
         }
-        remove_quietly(&temp).await;
+        if !resume {
+            remove_quietly(&temp).await;
+        }
         return Err(YsttError::Range(format!(
             "initial body ended after {prefix} of {total} bytes"
         )));
@@ -637,23 +735,39 @@ pub(crate) async fn download_adaptive(
         &temp,
         total,
         prefix,
-        etag,
-        last_modified,
+        state.etag.clone(),
+        state.last_modified.clone(),
         tracker,
+        if resume { Some(&mut state) } else { None },
     )
     .await
     {
-        remove_quietly(&temp).await;
+        if resume {
+            let _ = state.save().await;
+        } else {
+            remove_quietly(&temp).await;
+        }
         return Err(error);
     }
 
     if let Err(error) = validate_download(&temp, MediaKind::Video).await {
-        remove_quietly(&temp).await;
+        if resume {
+            let _ = state.save().await;
+        } else {
+            remove_quietly(&temp).await;
+        }
         return Err(error);
     }
     if let Err(error) = fs::rename(&temp, path).await {
-        remove_quietly(&temp).await;
+        if resume {
+            let _ = state.save().await;
+        } else {
+            remove_quietly(&temp).await;
+        }
         return Err(error.into());
+    }
+    if resume {
+        remove_quietly(&checkpoint_path).await;
     }
 
     debug!(
@@ -676,6 +790,7 @@ async fn download_remaining(
     etag: Option<String>,
     last_modified: Option<String>,
     tracker: Option<std::sync::Arc<ProgressTracker>>,
+    mut resume: Option<&mut RangeResumeState<'_>>,
 ) -> Result<()> {
     let plan = RangePlanner::new(
         context.max_connections,
@@ -695,7 +810,15 @@ async fn download_remaining(
         return Ok(());
     }
 
-    let mut pending = plan.rest_ranges().iter().copied();
+    let completed_snapshot = resume
+        .as_ref()
+        .map(|state| state.completed.clone())
+        .unwrap_or_default();
+    let mut pending = plan
+        .rest_ranges()
+        .iter()
+        .copied()
+        .filter(|range| !covers(&completed_snapshot, *range));
     let mut tasks = JoinSet::new();
     let max_rest = context.max_connections.saturating_sub(1).max(1);
     let start = if context.adaptive_ranges {
@@ -733,6 +856,10 @@ async fn download_remaining(
         };
         match joined {
             Ok((range, Ok(()), elapsed)) => {
+                if let Some(state) = resume.as_mut() {
+                    state.completed.push(range);
+                    state.save().await?;
+                }
                 if context.adaptive_ranges {
                     let _ = controller.observe(range.len(), elapsed.as_secs_f64());
                     debug!(
@@ -1092,7 +1219,47 @@ fn header_string(response: &HttpResponse, name: http::header::HeaderName) -> Opt
         .map(str::to_owned)
 }
 
-fn resume_part_path(path: &Path) -> PathBuf {
+fn adaptive_part_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "media".into());
+    path.with_file_name(format!(".{name}.ranges.part"))
+}
+
+fn adaptive_checkpoint_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "media".into());
+    path.with_file_name(format!(".{name}.ranges.json"))
+}
+
+fn covers(completed: &[ByteRange], range: ByteRange) -> bool {
+    completed
+        .iter()
+        .any(|existing| existing.start <= range.start && existing.end >= range.end)
+}
+
+async fn load_checkpoint(path: &Path) -> Option<RangeCheckpoint> {
+    let bytes = fs::read(path).await.ok()?;
+    let checkpoint: RangeCheckpoint = serde_json::from_slice(&bytes).ok()?;
+    let age = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs()
+        .saturating_sub(checkpoint.created_unix);
+    (age < 24 * 60 * 60).then_some(checkpoint)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+pub(crate) fn resume_part_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

@@ -1,7 +1,7 @@
 //! Deterministic HTTP range planning for video downloads.
 
 /// Inclusive byte range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ByteRange {
     /// First byte, inclusive.
     pub start: u64,

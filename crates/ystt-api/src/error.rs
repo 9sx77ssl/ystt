@@ -5,7 +5,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use ystt::YsttError;
+use ystt::{ErrorContext, YsttError};
 
 /// Stable machine-readable error payload.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -14,6 +14,9 @@ pub struct ErrorBody {
     pub code: String,
     /// Human-readable message.
     pub message: String,
+    /// Optional non-secret diagnostic context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ErrorContext>,
 }
 
 /// Envelope returned for every non-2xx response.
@@ -40,6 +43,7 @@ impl ApiError {
             body: ErrorBody {
                 code: code.to_owned(),
                 message: message.into(),
+                context: None,
             },
         }
     }
@@ -77,18 +81,26 @@ impl From<YsttError> for ApiError {
                 StatusCode::NOT_FOUND
             }
             YsttError::FileTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            YsttError::Cancelled => StatusCode::REQUEST_TIMEOUT,
+            YsttError::Cancelled | YsttError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             YsttError::Network(_) | YsttError::Waf(_) | YsttError::Parse(_) => {
                 StatusCode::BAD_GATEWAY
             }
             YsttError::Partial(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            YsttError::FileExists(_) => StatusCode::CONFLICT,
             YsttError::Config(_)
             | YsttError::Io(_)
             | YsttError::Range(_)
             | YsttError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let code = error.code();
-        Self::new(status, code, error.to_string())
+        let info = error.info();
+        Self {
+            status,
+            body: ErrorBody {
+                code: info.code.to_owned(),
+                message: info.message,
+                context: info.context,
+            },
+        }
     }
 }
 

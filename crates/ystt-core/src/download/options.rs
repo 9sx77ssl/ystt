@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{DownloadOptions, QualityPolicy, YsttConfig};
+use crate::config::{DownloadOptions, FilenameCollision, QualityPolicy, YsttConfig};
 use crate::progress::ProgressReporter;
 
 /// Effective values after merging [`YsttConfig`] with [`DownloadOptions`].
@@ -12,6 +12,7 @@ pub(crate) struct ResolvedOptions {
     pub(crate) output_dir: PathBuf,
     pub(crate) quality: QualityPolicy,
     pub(crate) filename_template: Option<String>,
+    pub(crate) filename_collision: FilenameCollision,
     pub(crate) include_audio: bool,
     pub(crate) allow_partial: bool,
     pub(crate) reuse_existing: bool,
@@ -44,6 +45,9 @@ impl ResolvedOptions {
                 .filename_template
                 .clone()
                 .or_else(|| config.output.filename_template.clone()),
+            filename_collision: options
+                .filename_collision
+                .unwrap_or(config.output.filename_collision),
             include_audio: options.include_audio.unwrap_or(config.output.include_audio),
             allow_partial: options.allow_partial.unwrap_or(config.output.allow_partial),
             reuse_existing: options

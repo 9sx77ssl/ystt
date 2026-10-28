@@ -9,12 +9,14 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use futures_util::{StreamExt, stream};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing_subscriber::EnvFilter;
 use ystt_core::{
-    BatchOptions, BatchResult, DownloadOptions, DownloadResult, ProgressEvent, ProgressReporter,
-    QualityPolicy, SoundCloudAudio, SoundCloudCache, SoundCloudEntity, SoundCloudPlaylist, Ystt,
-    YsttError, is_soundcloud_url, normalize_soundcloud_url, sanitize_filename,
+    BatchOptions, BatchResult, DownloadOptions, DownloadResult, FilenameCollision, ProgressEvent,
+    ProgressReporter, QualityPolicy, SoundCloudAudio, SoundCloudCache, SoundCloudEntity,
+    SoundCloudPlaylist, Ystt, YsttError, is_soundcloud_url, normalize_soundcloud_url,
+    sanitize_filename,
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -62,9 +64,14 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = QualityArg::Balanced)]
     quality: QualityArg,
 
-    /// Output filename template: {author}/{artist}, {post_id}, {title}, {quality}.
+    /// Output filename template: {author}/{artist}, {post_id}, {title},
+    /// {quality}, {ext}, {kind}, {index}.
     #[arg(long, value_name = "TEMPLATE")]
     filename: Option<String>,
+
+    /// Existing output collision policy.
+    #[arg(long, value_enum, default_value_t = CollisionArg::Overwrite)]
+    collision: CollisionArg,
 
     /// Download the post's music track too (TikTok; SoundCloud is audio-only).
     #[arg(long)]
@@ -81,14 +88,72 @@ struct Cli {
     /// Shared cache root for file and metadata caches across outputs.
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
+
+    /// Total request timeout in seconds.
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u64>,
+
+    /// HTTP and media retry budget.
+    #[arg(long, value_name = "N")]
+    retries: Option<u32>,
+
+    /// Browser TLS/HTTP2 fingerprint profile.
+    #[arg(long, value_name = "PROFILE")]
+    browser: Option<String>,
+
+    /// Suppress informational tracing output.
+    #[arg(long)]
+    quiet: bool,
+
+    /// Optional TOML or JSON configuration file.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    output: Option<PathBuf>,
+    quality: Option<QualityArg>,
+    filename: Option<String>,
+    collision: Option<CollisionArg>,
+    audio: Option<bool>,
+    resume: Option<bool>,
+    no_cache: Option<bool>,
+    cache_dir: Option<PathBuf>,
+    concurrency: Option<usize>,
+    timeout: Option<u64>,
+    retries: Option<u32>,
+    browser: Option<String>,
+    quiet: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum QualityArg {
     Best,
     Compatible,
     Balanced,
+    Efficient,
     Fast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CollisionArg {
+    Overwrite,
+    Suffix,
+    Fail,
+}
+
+impl From<CollisionArg> for FilenameCollision {
+    fn from(value: CollisionArg) -> Self {
+        match value {
+            CollisionArg::Overwrite => Self::Overwrite,
+            CollisionArg::Suffix => Self::Suffix,
+            CollisionArg::Fail => Self::Fail,
+        }
+    }
 }
 
 impl From<QualityArg> for QualityPolicy {
@@ -97,6 +162,7 @@ impl From<QualityArg> for QualityPolicy {
             QualityArg::Best => Self::Best,
             QualityArg::Compatible => Self::Compatible,
             QualityArg::Balanced => Self::Balanced,
+            QualityArg::Efficient => Self::Efficient,
             QualityArg::Fast => Self::Fast,
         }
     }
@@ -104,9 +170,15 @@ impl From<QualityArg> for QualityPolicy {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(path) = cli.config.clone()
+        && let Err(error) = apply_config(&mut cli, &path)
+    {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
     let json = cli.json;
-    init_tracing();
+    init_tracing(cli.quiet);
 
     if let Err(error) = run(cli).await {
         if json {
@@ -121,6 +193,69 @@ async fn main() {
     }
 }
 
+fn apply_config(cli: &mut Cli, path: &std::path::Path) -> Result<(), YsttError> {
+    let text = std::fs::read_to_string(path)?;
+    let config: FileConfig = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        serde_json::from_str(&text)
+            .map_err(|error| YsttError::Config(format!("invalid JSON config: {error}")))?
+    } else {
+        toml::from_str(&text)
+            .map_err(|error| YsttError::Config(format!("invalid TOML config: {error}")))?
+    };
+    if cli.output == std::path::Path::new("downloads")
+        && let Some(value) = config.output
+    {
+        cli.output = value;
+    }
+    if cli.quality == QualityArg::Balanced
+        && let Some(value) = config.quality
+    {
+        cli.quality = value;
+    }
+    if cli.filename.is_none() {
+        cli.filename = config.filename;
+    }
+    if cli.collision == CollisionArg::Overwrite
+        && let Some(value) = config.collision
+    {
+        cli.collision = value;
+    }
+    if !cli.audio {
+        cli.audio = config.audio.unwrap_or(false);
+    }
+    if !cli.resume {
+        cli.resume = config.resume.unwrap_or(false);
+    }
+    if !cli.no_cache {
+        cli.no_cache = config.no_cache.unwrap_or(false);
+    }
+    if cli.cache_dir.is_none() {
+        cli.cache_dir = config.cache_dir;
+    }
+    if cli.concurrency == 4
+        && let Some(value) = config.concurrency
+    {
+        cli.concurrency = value.max(1);
+    }
+    if cli.timeout.is_none() {
+        cli.timeout = config.timeout;
+    }
+    if cli.retries.is_none() {
+        cli.retries = config.retries;
+    }
+    if cli.browser.is_none() {
+        cli.browser = config.browser;
+    }
+    if !cli.quiet {
+        cli.quiet = config.quiet.unwrap_or(false);
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<(), YsttError> {
     let mut builder = Ystt::builder()
         .output_dir(&cli.output)
@@ -128,12 +263,25 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
         .include_audio(cli.audio)
         .resume(cli.resume)
         .file_cache(!cli.no_cache)
-        .metadata_cache(!cli.no_cache);
+        .metadata_cache(!cli.no_cache)
+        .filename_collision(cli.collision.into());
     if let Some(cache_dir) = &cli.cache_dir {
         builder = builder.cache_dir(cache_dir);
     }
     if let Some(template) = &cli.filename {
         builder = builder.filename_template(template);
+    }
+    if let Some(seconds) = cli.timeout {
+        builder = builder.timeout(Duration::from_secs(seconds));
+    }
+    if let Some(retries) = cli.retries {
+        builder = builder.retries(retries);
+    }
+    if let Some(browser) = &cli.browser {
+        let profile = browser
+            .parse::<ystt_core::BrowserProfile>()
+            .map_err(YsttError::Config)?;
+        builder = builder.browser(profile);
     }
     let ystt = builder.build()?;
     let soundcloud_cache = (!cli.no_cache).then(|| {
@@ -151,7 +299,9 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
         .quality(cli.quality.into())
         .resume(cli.resume)
         .file_cache(!cli.no_cache)
-        .metadata_cache(!cli.no_cache);
+        .metadata_cache(!cli.no_cache)
+        .filename_collision(cli.collision.into())
+        .media_retries(cli.retries.unwrap_or(2));
     if let Some(template) = &cli.filename {
         options = options.filename_template(template);
     }
@@ -180,7 +330,12 @@ async fn run(cli: Cli) -> Result<(), YsttError> {
             .resume(cli.resume)
             .file_cache(!cli.no_cache)
             .metadata_cache(!cli.no_cache)
-            .concurrency(cli.concurrency);
+            .filename_collision(cli.collision.into())
+            .concurrency(cli.concurrency)
+            .item_retries(cli.retries.unwrap_or(2));
+        if let Some(seconds) = cli.timeout {
+            batch_options = batch_options.item_timeout(Duration::from_secs(seconds));
+        }
         if let Some(template) = &cli.filename {
             batch_options = batch_options.filename_template(template);
         }
@@ -341,6 +496,7 @@ async fn download_soundcloud_url(
                 &cli.output,
                 cli.filename.as_deref(),
                 cli.quality.into(),
+                cli.collision.into(),
                 &audio,
             )?;
             Ok(soundcloud_track_value(&audio, &path, cover.as_deref()))
@@ -353,6 +509,7 @@ async fn download_soundcloud_url(
             let output_dir = cli.output.clone();
             let template = cli.filename.clone();
             let quality = cli.quality.into();
+            let collision = cli.collision.into();
             let mut downloads = stream::iter(playlist.tracks.iter().cloned().enumerate().map(
                 |(index, track)| {
                     let ystt = ystt.clone();
@@ -368,6 +525,7 @@ async fn download_soundcloud_url(
                                         &output_dir,
                                         template.as_deref(),
                                         quality,
+                                        collision,
                                         &audio,
                                     )?;
                                     Ok(soundcloud_track_value(&audio, &path, cover.as_deref()))
@@ -423,10 +581,44 @@ async fn soundcloud_track_cached(
     Ok(audio)
 }
 
+fn unique_soundcloud_path(
+    path: PathBuf,
+    collision: FilenameCollision,
+) -> Result<PathBuf, YsttError> {
+    if collision == FilenameCollision::Overwrite || !path.exists() {
+        return Ok(path);
+    }
+    if collision == FilenameCollision::Fail {
+        return Err(YsttError::FileExists(path));
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    for counter in 1..=10_000u32 {
+        let candidate = path.with_file_name(if extension.is_empty() {
+            format!("{stem}_{counter}")
+        } else {
+            format!("{stem}_{counter}.{extension}")
+        });
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(YsttError::Config(
+        "could not find a free output filename".into(),
+    ))
+}
+
 fn write_soundcloud_audio(
     output_dir: &std::path::Path,
     template: Option<&str>,
     quality: QualityPolicy,
+    collision: FilenameCollision,
     audio: &SoundCloudAudio,
 ) -> Result<(PathBuf, Option<PathBuf>), YsttError> {
     std::fs::create_dir_all(output_dir)?;
@@ -441,7 +633,7 @@ fn write_soundcloud_audio(
     if name.is_empty() {
         name = format!("soundcloud_{}", audio.track.id);
     }
-    let path = output_dir.join(format!("{name}.{}", audio.ext));
+    let path = unique_soundcloud_path(output_dir.join(format!("{name}.{}", audio.ext)), collision)?;
     std::fs::write(&path, &audio.bytes)?;
     let cover = audio.artwork.as_ref().map(|artwork| {
         let extension = match artwork.mime.as_str() {
@@ -825,8 +1017,9 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+fn init_tracing(quiet: bool) {
+    let fallback = if quiet { "error" } else { "warn" };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -841,5 +1034,29 @@ mod tests {
     fn url_file_skips_comments_and_blank_lines() {
         let urls = parse_urls("# comment\n\nhttps://a\n  https://b  \n");
         assert_eq!(urls, vec!["https://a", "https://b"]);
+    }
+
+    #[test]
+    fn toml_config_parses_typed_options() {
+        let config: FileConfig = toml::from_str(
+            r#"
+output = "music"
+quality = "efficient"
+filename = "{kind}-{post_id}.{ext}"
+collision = "suffix"
+audio = true
+timeout = 45
+retries = 4
+browser = "firefox151"
+quiet = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.output, Some(PathBuf::from("music")));
+        assert_eq!(config.quality, Some(QualityArg::Efficient));
+        assert_eq!(config.collision, Some(CollisionArg::Suffix));
+        assert_eq!(config.timeout, Some(45));
+        assert_eq!(config.retries, Some(4));
+        assert!(config.quiet.unwrap());
     }
 }

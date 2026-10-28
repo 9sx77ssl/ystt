@@ -23,13 +23,15 @@ the CLI, HTTP API and Telegram bot are thin consumers of it.
 - authenticated HTTP API with generated OpenAPI 3.1;
 - shared cache root across output directories;
 - cross-process file-cache locks;
-- resumable videos and filename templates;
+- resumable single-stream and adaptive-range videos with checkpoints;
+- filename templates and collision policies;
 - unified progress for downloads, resolve calls and batches;
 - optional HTTP/2 connection/keep-alive tuning without changing TLS/JA3/JA4;
 - progress events through a callback, channel or custom sink;
 - partial gallery results with per-item failures;
 - per-media retry budget;
-- bitrate/codec/dimension metadata and four quality policies;
+- bitrate/codec/dimension metadata and five quality policies, including
+  `efficient` H.265 selection;
 - typed errors, stage timings, offline tests and a local HTTP integration suite.
 
 ### SoundCloud
@@ -107,11 +109,15 @@ Metadata only:
 ### CLI flags
 
 ```text
-ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
+ystt <URL> [-o DIR] [--info] [--json]
+           [--quality best|compatible|balanced|efficient|fast]
            [--audio] [--no-cache] [--cache-dir DIR]
+           [--collision overwrite|suffix|fail]
+           [--timeout SECONDS] [--retries N] [--browser PROFILE] [--quiet]
+           [--config FILE.toml|FILE.json]
 ystt --urls-file FILE [--concurrency N] [same download flags]
 ystt --progress URL
-ystt --filename "{author}-{post_id}-{quality}" URL
+ystt --filename "{kind}-{index}-{post_id}.{ext}" URL
 ystt --resume URL
 ```
 
@@ -134,10 +140,19 @@ Defaults:
 - `--concurrency` controls batch concurrency (default 4, capped at 64); it requires `--urls-file`.
 - `--progress` writes one `ProgressEvent` JSON object per line to stderr.
 - `--filename` sets the filename base; placeholders: `{author}`, `{artist}`,
-  `{post_id}`, `{title}`, `{quality}`. Path separators are sanitized. SoundCloud
-  defaults to `{artist} - {title}`.
-- `--resume` continues a video from `.<name>.part` using a range request. It
-  uses one resumable stream; adaptive range parallelism is skipped while enabled.
+  `{post_id}`, `{title}`, `{quality}`, `{kind}`, `{index}`, `{ext}`. Path
+  separators are sanitized. `{ext}` is not appended twice.
+- `--collision overwrite|suffix|fail` controls existing output files. The
+  default is `overwrite`; `suffix` appends `_1`, `_2`, ...; `fail` returns
+  `file_exists`.
+- `--timeout` sets the HTTP request deadline, `--retries` sets HTTP/media
+  retries, `--browser` selects the browser fingerprint profile and `--quiet`
+  lowers tracing output.
+- `--config` reads TOML or JSON; explicit non-default CLI flags take precedence.
+- `--resume` continues a video from `.<name>.part` using one resumable stream.
+  When no `.part` exists and adaptive ranges are available, it also supports a
+  `.ranges.json` checkpoint with total size, ETag/Last-Modified and completed
+  ranges; the checkpoint is removed after a clean rename.
 
 ## Library
 

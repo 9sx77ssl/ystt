@@ -1,5 +1,7 @@
 //! Typed errors for the public `ystt` API.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ystt_net::NetError;
@@ -22,6 +24,22 @@ pub struct PartialFailure {
     pub error: String,
 }
 
+/// Non-secret context attached to an error for debugging and JSON APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ErrorContext {
+    /// Provider guessed from the failed URL.
+    pub provider: Option<String>,
+    /// Host that failed, when known.
+    pub host: Option<String>,
+    /// Media kind, when known.
+    pub kind: Option<MediaKind>,
+    /// HTTP status, when known.
+    pub status: Option<u16>,
+    /// Attempt number, when known.
+    pub attempt: Option<u32>,
+}
+
 /// Stable, serializable error payload for HTTP APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorInfo {
@@ -29,6 +47,9 @@ pub struct ErrorInfo {
     pub code: &'static str,
     /// Human-readable message.
     pub message: String,
+    /// Optional structured context. Never contains credentials or cookies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ErrorContext>,
 }
 
 /// Errors returned by the downloader.
@@ -83,6 +104,10 @@ pub enum YsttError {
         limit: u64,
     },
 
+    /// The requested output path already exists under the fail policy.
+    #[error("output file already exists: {0}")]
+    FileExists(PathBuf),
+
     /// Filesystem failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -90,6 +115,10 @@ pub enum YsttError {
     /// The caller cancelled the operation.
     #[error("cancelled")]
     Cancelled,
+
+    /// A per-item or per-request deadline expired.
+    #[error("operation timed out")]
+    Timeout,
 
     /// Parallel range download failed.
     #[error("range download failed: {0}")]
@@ -119,8 +148,10 @@ impl YsttError {
             Self::NoMedia => "no_media",
             Self::NoVideo => "no_video",
             Self::FileTooLarge { .. } => "file_too_large",
+            Self::FileExists(_) => "file_exists",
             Self::Io(_) => "io",
             Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
             Self::Range(_) => "range",
             Self::Partial(_) => "partial",
             Self::Internal(_) => "internal",
@@ -132,7 +163,37 @@ impl YsttError {
         ErrorInfo {
             code: self.code(),
             message: self.to_string(),
+            context: self.context(),
         }
+    }
+
+    fn context(&self) -> Option<ErrorContext> {
+        let (url, status) = match self {
+            Self::Network(NetError::Status { status, url }) => (Some(url.as_str()), Some(*status)),
+            _ => (None, None),
+        };
+        let host = url
+            .and_then(|url| url::Url::parse(url).ok())
+            .and_then(|url| url.host_str().map(str::to_owned));
+        let provider = host.as_deref().and_then(|host| {
+            if host.ends_with("soundcloud.com") {
+                Some("soundcloud".into())
+            } else if host.contains("tiktok.com") {
+                Some("tiktok".into())
+            } else {
+                None
+            }
+        });
+        if host.is_none() && status.is_none() && provider.is_none() {
+            return None;
+        }
+        Some(ErrorContext {
+            provider,
+            host,
+            kind: None,
+            status,
+            attempt: None,
+        })
     }
 
     /// Whether a retry at a higher layer can reasonably succeed.
@@ -142,6 +203,7 @@ impl YsttError {
             Self::Waf(WafError::NotSolved(_)) => false,
             Self::Io(_)
             | Self::Cancelled
+            | Self::Timeout
             | Self::Parse(_)
             | Self::Unavailable(_)
             | Self::AgeRestricted
@@ -151,6 +213,7 @@ impl YsttError {
             | Self::Config(_)
             | Self::UnsupportedUrl(_)
             | Self::FileTooLarge { .. }
+            | Self::FileExists(_)
             | Self::Range(_)
             | Self::Partial(_)
             | Self::Internal(_) => false,
@@ -190,6 +253,19 @@ mod tests {
     #[test]
     fn timeout_is_retryable() {
         assert!(YsttError::Network(NetError::Timeout).is_retryable());
+    }
+
+    #[test]
+    fn network_error_context_has_host_status_and_provider() {
+        let error = YsttError::Network(NetError::Status {
+            status: 502,
+            url: "https://api-v2.soundcloud.com/x".into(),
+        });
+        let info = error.info();
+        let context = info.context.expect("context");
+        assert_eq!(context.provider.as_deref(), Some("soundcloud"));
+        assert_eq!(context.host.as_deref(), Some("api-v2.soundcloud.com"));
+        assert_eq!(context.status, Some(502));
     }
 
     #[test]

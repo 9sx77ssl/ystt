@@ -48,9 +48,17 @@ impl Ystt {
                     .get(&index)
                     .cloned()
                     .or_else(|| batch.signal.clone());
-                let result = downloader
-                    .download_with_emitter(&url, item_options, &item_emitter)
-                    .await;
+                if let Some(retries) = batch.item_retries {
+                    item_options.media_retries = Some(retries);
+                }
+                let future = downloader.download_with_emitter(&url, item_options, &item_emitter);
+                let result = match batch.item_timeout {
+                    Some(timeout) => match tokio::time::timeout(timeout, future).await {
+                        Ok(result) => result,
+                        Err(_) => Err(crate::error::YsttError::Timeout),
+                    },
+                    None => future.await,
+                };
                 let item = match result {
                     Ok(result) => BatchItemResult {
                         url,
@@ -102,6 +110,8 @@ impl Ystt {
         BatchResult {
             items: results,
             total_ms,
+            successes,
+            failures,
         }
     }
 }

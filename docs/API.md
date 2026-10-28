@@ -153,6 +153,8 @@ curl -H "Authorization: Bearer $YSTT_API_KEY" \
     "https://soundcloud.com/b/sets/playlist"
   ],
   "concurrency": 2,
+  "item_timeout_ms": 120000,
+  "item_retries": 2,
   "include_audio": false
 }
 ```
@@ -176,7 +178,9 @@ All non-2xx responses use:
 
 Stable error codes include `unauthorized`, `rate_limited`, `invalid_url`,
 `unsupported_url`, `unavailable`, `age_restricted`, `no_media`, `no_video`,
-`file_too_large`, `partial`, `network`, and `internal`.
+`file_too_large`, `file_exists`, `timeout`, `partial`, `network`, and `internal`.
+Errors may carry a non-secret `context` object with `provider`, `host`, `kind`,
+`status` and `attempt` when known.
 
 ## Runtime limits
 

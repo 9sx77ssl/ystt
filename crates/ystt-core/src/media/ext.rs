@@ -137,19 +137,47 @@ pub fn sanitize_filename(value: &str) -> String {
     sanitized
 }
 
-/// Base filename shared by all files of one post.
-pub(crate) fn base_filename(
+/// Render a per-media filename. `{author}`, `{post_id}`, `{quality}`, `{ext}`,
+/// `{kind}` and `{index}` are supported. The extension is appended once unless
+/// the template contains `{ext}`.
+pub(crate) fn media_filename(
     template: Option<&str>,
     author_id: &str,
     post_id: &str,
     quality: &str,
+    kind: MediaKind,
+    index: Option<usize>,
+    ext: &str,
 ) -> String {
+    let default = match kind {
+        MediaKind::Video => "tiktok_{author}_{post_id}",
+        MediaKind::Photo => "tiktok_{author}_{post_id}_photo_{index}",
+        MediaKind::Audio => "tiktok_{author}_{post_id}_audio",
+    };
     let template = template
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("tiktok_{author}_{post_id}");
-    let rendered = template
+        .unwrap_or(default);
+    let has_kind = template.contains("{kind}");
+    let has_index = template.contains("{index}");
+    let has_ext = template.contains("{ext}");
+    let index = index.unwrap_or(1).to_string();
+    let mut rendered = template
         .replace("{author}", author_id)
         .replace("{post_id}", post_id)
-        .replace("{quality}", quality);
+        .replace("{quality}", quality)
+        .replace("{kind}", kind.as_str())
+        .replace("{index}", &index);
+    if kind == MediaKind::Photo && !has_kind && !has_index {
+        rendered.push_str(&format!("_photo_{index}"));
+    }
+    if kind == MediaKind::Audio && !has_kind && !has_index {
+        rendered.push_str("_audio");
+    }
+    if has_ext {
+        rendered = rendered.replace("{ext}", ext);
+    } else {
+        rendered.push('.');
+        rendered.push_str(ext);
+    }
     sanitize_filename(&rendered)
 }

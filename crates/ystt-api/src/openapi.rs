@@ -59,6 +59,7 @@ impl Modify for SecurityAddon {
         crate::error::ErrorResponse,
         crate::store::MediaStats,
         ystt::Author,
+        ystt::ErrorContext,
         ystt::MediaInfo,
         ystt::MediaKind,
         ystt::PartialFailure,

@@ -60,6 +60,9 @@ Important core modules:
 - `download/options.rs` — resolved config/override merge;
 - `download/job.rs` — disk download state machine;
 - `download/bytes.rs` — generic in-memory TikTok video/gallery/audio path;
+- `download/resolver.rs` — full-page, embed, short-link and WAF resolver;
+- `media/transfer.rs` — single-stream, adaptive range and range-checkpoint
+  resume paths;
 - `soundcloud.rs` — public `client_id`, resolve, playlist hydration, transcoding
   selection, HLS segment parsing/assembly and native audio transfer;
 - `media/transfer.rs` — single stream, resume, adaptive ranges, in-memory
@@ -166,7 +169,7 @@ See `../ystg/AGENTS.md` for the bot-specific contract.
 5. Add tests at the lowest stable layer and at least one integration/boundary
    test when the behavior crosses HTTP.
 6. Update `README.md`, `docs/GUIDE.md`, `docs/API.md`, `docs/INTERNALS.md`,
-   `ROADMAP.md` and this file as applicable.
+   this file as applicable.
 7. Deploy only after `fmt`, `clippy`, workspace tests, integration tests and a
    real endpoint smoke test.
 

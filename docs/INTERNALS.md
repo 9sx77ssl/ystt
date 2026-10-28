@@ -10,8 +10,9 @@ ystt-waf   (no ystt deps)   challenge parsing + parallel SHA-256 solver
 ystt-net   (no ystt deps)   wreq client, emulation, retries, rate limits
 ystt-core  (net + waf)      provider model, URL/TikTok parser, SoundCloud
   resolver/HLS, media/caches/progress/pipeline;
-  download/{types,options,job,bytes,batch,builder};
+  download/{types,options,job,bytes,batch,builder,resolver};
   soundcloud.rs;
+  download/resolver.rs (TikTok page/embed/short-link resolution);
   media/{transfer,validation,ext}. Transport, cache and cookie helpers are
   independent modules. The API depends only on the public core facade.
 ystt-cli   (core)           minimal clap front-end
@@ -358,7 +359,15 @@ completed/failed counts. Media progress is reported by the same
 `ProgressTracker` used by solo downloads. `BatchOptions::progress` attaches a
 reporter to the batch and all its items.
 
-### Adaptive video transfer
+### Adaptive video transfer and resume
+
+Adaptive range downloads use a bounded connection plan. With `--resume`, the
+temporary `.ranges.part` plus a small `.ranges.json` checkpoint record total
+size, ETag/Last-Modified and completed inclusive ranges. A new run reuses only
+a checkpoint whose metadata matches the current response; completed ranges are
+skipped, new ranges are appended to the same file, and the checkpoint is
+removed only after validation and atomic rename. A seeded legacy `.part` keeps
+the single-stream resume path.
 
 The first request is a **normal browser-like GET**, not a Range request. This is
 important: TikTok's CDN serves small files faster with `200` than with `206`.

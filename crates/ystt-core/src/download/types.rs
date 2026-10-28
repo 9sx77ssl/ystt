@@ -1,6 +1,7 @@
 //! Public result and batch types for the download pipeline.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use bytes::Bytes;
 use serde::Serialize;
@@ -152,6 +153,10 @@ pub struct BatchOptions {
     pub signal: Option<CancellationToken>,
     /// Per-item cancellation tokens, keyed by input index.
     pub item_signals: std::collections::HashMap<usize, CancellationToken>,
+    /// Optional wall-clock timeout applied to each item.
+    pub item_timeout: Option<Duration>,
+    /// Optional media retry override applied to each item.
+    pub item_retries: Option<u32>,
 }
 
 impl std::fmt::Debug for BatchOptions {
@@ -163,6 +168,8 @@ impl std::fmt::Debug for BatchOptions {
             .field("progress", &self.progress.is_some())
             .field("signal", &self.signal.is_some())
             .field("item_signals", &self.item_signals.len())
+            .field("item_timeout", &self.item_timeout)
+            .field("item_retries", &self.item_retries)
             .finish()
     }
 }
@@ -182,6 +189,8 @@ impl BatchOptions {
             progress: None,
             signal: None,
             item_signals: std::collections::HashMap::new(),
+            item_timeout: None,
+            item_retries: None,
         }
     }
 
@@ -206,6 +215,12 @@ impl BatchOptions {
     /// Set the output filename template.
     pub fn filename_template(mut self, template: impl Into<String>) -> Self {
         self.download.filename_template = Some(template.into());
+        self
+    }
+
+    /// Set the output collision policy.
+    pub fn filename_collision(mut self, collision: crate::config::FilenameCollision) -> Self {
+        self.download.filename_collision = Some(collision);
         self
     }
 
@@ -256,6 +271,18 @@ impl BatchOptions {
         self.item_signals.insert(index, signal);
         self
     }
+
+    /// Apply a wall-clock timeout to every item.
+    pub fn item_timeout(mut self, timeout: Duration) -> Self {
+        self.item_timeout = Some(timeout);
+        self
+    }
+
+    /// Override the media retry budget for every item.
+    pub fn item_retries(mut self, retries: u32) -> Self {
+        self.item_retries = Some(retries);
+        self
+    }
 }
 
 /// Result for one URL in a batch.
@@ -276,22 +303,20 @@ pub struct BatchResult {
     pub items: Vec<BatchItemResult>,
     /// End-to-end wall time.
     pub total_ms: u64,
+    /// Successful item count.
+    pub successes: usize,
+    /// Failed item count.
+    pub failures: usize,
 }
 
 impl BatchResult {
     /// Number of successful items.
     pub fn successes(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|item| item.result.is_some())
-            .count()
+        self.successes
     }
 
     /// Number of failed items.
     pub fn failures(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|item| item.error.is_some())
-            .count()
+        self.failures
     }
 }

@@ -372,6 +372,8 @@ impl Downloader {
         &self,
         urls: Vec<String>,
         concurrency: Option<usize>,
+        item_timeout: Option<Duration>,
+        item_retries: Option<u32>,
         input: &DownloadOptionsInput,
     ) -> Result<BatchResponse, ApiError> {
         if urls.is_empty() {
@@ -396,9 +398,23 @@ impl Downloader {
         let mut results: Vec<Option<BatchItem>> = vec![None; total];
         let mut items = stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
             let downloader = self.clone();
-            let input = input.clone();
+            let mut input = input.clone();
+            if let Some(retries) = item_retries {
+                input.media_retries = Some(retries);
+            }
             async move {
-                let result = downloader.download(&url, &input).await;
+                let future = downloader.download(&url, &input);
+                let result = match item_timeout {
+                    Some(timeout) => match tokio::time::timeout(timeout, future).await {
+                        Ok(result) => result,
+                        Err(_) => Err(ApiError::new(
+                            axum::http::StatusCode::GATEWAY_TIMEOUT,
+                            "timeout",
+                            "batch item timed out",
+                        )),
+                    },
+                    None => future.await,
+                };
                 let item = match result {
                     Ok(result) => BatchItem {
                         index,

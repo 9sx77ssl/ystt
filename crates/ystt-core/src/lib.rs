@@ -21,12 +21,12 @@ pub mod soundcloud_cache;
 pub mod url;
 
 pub use cache::{UrlCache, signed_url_ttl};
-pub use config::{DownloadOptions, QualityPolicy, YsttConfig};
+pub use config::{DownloadOptions, FilenameCollision, QualityPolicy, YsttConfig};
 pub use download::{
     BatchItemResult, BatchOptions, BatchResult, DownloadResult, InMemoryFile, InMemoryPost,
     InMemoryVideo, Timings, Ystt, YsttBuilder,
 };
-pub use error::{ErrorInfo, PartialFailure, Result, YsttError};
+pub use error::{ErrorContext, ErrorInfo, PartialFailure, Result, YsttError};
 pub use file_cache::{CachedFile, FileCache, FileCacheEntry};
 pub use media::{DownloadedFile, sanitize_filename};
 pub use metadata::{CachedMetadata, MetadataCache, default_metadata_root, filter_session_cookie};
@@ -46,3 +46,4 @@ pub use soundcloud::{
 pub use soundcloud_cache::SoundCloudCache;
 pub use tokio_util::sync::CancellationToken;
 pub use url::{TikTokUrl, find_post_id_in_html, get_post_id};
+pub use ystt_net::BrowserProfile;

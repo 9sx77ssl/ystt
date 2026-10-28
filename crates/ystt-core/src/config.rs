@@ -19,6 +19,9 @@ pub enum QualityPolicy {
     /// H.264 within 1080p/1920px, highest bitrate; good first-frame latency and quality.
     #[default]
     Balanced,
+    /// Prefer H.265 when it is smaller at equivalent or better resolution,
+    /// otherwise use the H.264 Balanced choice.
+    Efficient,
     /// Lowest usable bitrate. Smallest file and fastest time to finish.
     Fast,
 }
@@ -30,7 +33,33 @@ impl QualityPolicy {
             Self::Best => "best",
             Self::Compatible => "compatible",
             Self::Balanced => "balanced",
+            Self::Efficient => "efficient",
             Self::Fast => "fast",
+        }
+    }
+}
+
+/// What to do when an output path already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum FilenameCollision {
+    /// Replace the existing file (backward-compatible default).
+    #[default]
+    Overwrite,
+    /// Append `_1`, `_2`, ... before the extension.
+    Suffix,
+    /// Fail with a typed `file_exists` error.
+    Fail,
+}
+
+impl FilenameCollision {
+    /// Stable name for CLI/JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Overwrite => "overwrite",
+            Self::Suffix => "suffix",
+            Self::Fail => "fail",
         }
     }
 }
@@ -42,8 +71,11 @@ pub struct OutputConfig {
     pub dir: PathBuf,
     /// Default quality policy.
     pub quality: QualityPolicy,
-    /// Filename template with `{author}`, `{post_id}`, `{quality}`.
+    /// Filename template with `{author}`, `{post_id}`, `{quality}`, `{ext}`,
+    /// `{kind}` and `{index}`.
     pub filename_template: Option<String>,
+    /// Collision policy for an existing output path.
+    pub filename_collision: FilenameCollision,
     /// Download the post's music track in addition to video/photos.
     pub include_audio: bool,
     /// Return successful gallery photos and list failures instead of failing all.
@@ -58,6 +90,7 @@ impl Default for OutputConfig {
             dir: PathBuf::from("downloads"),
             quality: QualityPolicy::default(),
             filename_template: None,
+            filename_collision: FilenameCollision::Overwrite,
             include_audio: false,
             allow_partial: true,
             reuse_existing: false,
@@ -199,6 +232,8 @@ pub struct DownloadOptions {
     pub quality: Option<QualityPolicy>,
     /// Output filename template override.
     pub filename_template: Option<String>,
+    /// Output collision policy override.
+    pub filename_collision: Option<FilenameCollision>,
     /// Include the music track.
     pub include_audio: Option<bool>,
     /// Enable or disable range-first downloads.
@@ -236,6 +271,7 @@ impl std::fmt::Debug for DownloadOptions {
             .field("output_dir", &self.output_dir)
             .field("quality", &self.quality)
             .field("filename_template", &self.filename_template)
+            .field("filename_collision", &self.filename_collision)
             .field("include_audio", &self.include_audio)
             .field("parallel_ranges", &self.parallel_ranges)
             .field("max_connections", &self.max_connections)
@@ -275,6 +311,12 @@ impl DownloadOptions {
     /// Set the output filename template.
     pub fn filename_template(mut self, template: impl Into<String>) -> Self {
         self.filename_template = Some(template.into());
+        self
+    }
+
+    /// Set the output collision policy.
+    pub fn filename_collision(mut self, collision: FilenameCollision) -> Self {
+        self.filename_collision = Some(collision);
         self
     }
 

@@ -38,6 +38,12 @@ impl YsttBuilder {
         self
     }
 
+    /// Output collision policy.
+    pub fn filename_collision(mut self, collision: crate::config::FilenameCollision) -> Self {
+        self.config.output.filename_collision = collision;
+        self
+    }
+
     /// Download music tracks.
     ///
     /// Audio uses the same pipeline and ALPN Auto transport as video; H1-only

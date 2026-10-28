@@ -10,8 +10,8 @@ mod support;
 use std::sync::atomic::Ordering;
 
 use ystt::{
-    BatchOptions, CancellationToken, DownloadOptions, MediaKind, ProgressStage, Ystt, YsttError,
-    progress_channel,
+    BatchOptions, CancellationToken, DownloadOptions, FilenameCollision, MediaKind, ProgressStage,
+    Ystt, YsttError, progress_channel,
 };
 
 fn video_url() -> &'static str {
@@ -144,6 +144,74 @@ async fn video_resume_appends_from_part_file() {
 }
 
 #[tokio::test]
+async fn adaptive_range_resume_reuses_completed_checkpoint() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .parallel_ranges(true)
+        .range_first_chunk(64 * 1024)
+        .range_min_chunk(32 * 1024)
+        .range_threshold(0)
+        .max_connections(4)
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    let part = dir.path().join(".tiktok_test_123.mp4.ranges.part");
+    let checkpoint = dir.path().join(".tiktok_test_123.mp4.ranges.json");
+    let body = support::video_body();
+    let prefix = 64 * 1024;
+    let mut partial = vec![0u8; support::VIDEO_SIZE];
+    partial[..prefix].copy_from_slice(&body[..prefix]);
+    tokio::fs::write(&part, &partial).await.unwrap();
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let manifest = serde_json::json!({
+        "total": support::VIDEO_SIZE,
+        "etag": null,
+        "last_modified": null,
+        "completed": [{"start": 0, "end": prefix - 1}],
+        "created_unix": created
+    });
+    tokio::fs::write(&checkpoint, serde_json::to_vec(&manifest).unwrap())
+        .await
+        .unwrap();
+
+    let result = ystt
+        .download_with(
+            video_url(),
+            DownloadOptions::new().output_dir(dir.path()).resume(true),
+        )
+        .await
+        .unwrap();
+    let video = result.video.expect("video");
+    assert_eq!(tokio::fs::read(&video.path).await.unwrap(), body);
+    eprintln!(
+        "counters total={} media={} ranges={}",
+        server.counters.total.load(Ordering::Relaxed),
+        server.counters.media.load(Ordering::Relaxed),
+        server.counters.ranges.load(Ordering::Relaxed)
+    );
+    if part.exists() {
+        eprintln!("unexpected adaptive part; dir entries:");
+        let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            eprintln!(
+                "  {:?} {}",
+                entry.path(),
+                entry.metadata().await.unwrap().len()
+            );
+        }
+    }
+    assert!(!part.exists());
+    assert!(!checkpoint.exists());
+}
+
+#[tokio::test]
 async fn audio_failure_is_reported_and_video_is_not_cached() {
     let server = support::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -263,6 +331,46 @@ async fn filename_template_is_used() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(name, "test-123-balanced.mp4");
+}
+
+#[tokio::test]
+async fn output_template_placeholders_and_collision_suffix() {
+    let server = support::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ystt = Ystt::builder()
+        .output_dir(dir.path())
+        .page_origin(server.origin.clone())
+        .file_cache(false)
+        .metadata_cache(false)
+        .build()
+        .unwrap();
+    let options = DownloadOptions::new()
+        .output_dir(dir.path())
+        .filename_template("{post_id}-{kind}-{index}.{ext}")
+        .filename_collision(FilenameCollision::Suffix);
+    let first = ystt
+        .download_with(video_url(), options.clone())
+        .await
+        .unwrap();
+    let second = ystt.download_with(video_url(), options).await.unwrap();
+    let first_name = first
+        .video
+        .unwrap()
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let second_name = second
+        .video
+        .unwrap()
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(first_name, "123-video-1.mp4");
+    assert_eq!(second_name, "123-video-1_1.mp4");
 }
 
 #[tokio::test]

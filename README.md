@@ -15,7 +15,7 @@ fMP4/MP3 HLS assembly. Everything is in memory for the API and bot.
 ### TikTok
 
 - Public videos, photo galleries and optional music.
-- Full-page H.264 `playAddr` path with a four-policy quality selector.
+- Full-page H.264 `playAddr` path with a five-policy quality selector (including efficient H.265).
 - Official embed resolver as a fallback.
 - `vm.`, `vt.` and `/t/` short links.
 - Browser TLS/JA3/JA4 and HTTP/2 emulation via `wreq`.
@@ -24,6 +24,16 @@ fMP4/MP3 HLS assembly. Everything is in memory for the API and bot.
 - Parallel WAF proof-of-work solver with an in-process solved-cookie cache.
 - One-request `200` path for typical videos; adaptive ranges for large files.
 - BLAKE3 content-addressed file cache with TTL and atomic manifests.
+- Resumable adaptive range downloads with a small `.ranges.json` checkpoint
+  (total, ETag/Last-Modified, completed ranges); single-stream `.part` resume
+  remains the fallback.
+- Output templates with `{ext}`, `{kind}`, `{index}` and overwrite/suffix/fail
+  collision policies.
+- `efficient` quality policy: H.265 when it is smaller at equivalent resolution.
+- Batch per-item timeout/retry overrides and aggregate success/failure counts.
+- Structured error context with provider/host/status and no credentials.
+- CLI TOML/JSON config, timeout, retries, browser profile and quiet mode.
+- Structured error context (provider, host, HTTP status) without credentials.
 - Persistent metadata/signed-URL cache across processes.
 - Batch API with bounded concurrency and per-item cancellation.
 - In-memory video, gallery and audio downloads for bots, HTTP APIs and streaming
@@ -110,11 +120,15 @@ The binary is `target/release/ystt`.
 ## CLI
 
 ```bash
-ystt <URL> [-o DIR] [--info] [--json] [--quality best|compatible|balanced|fast]
+ystt <URL> [-o DIR] [--info] [--json]
+           [--quality best|compatible|balanced|efficient|fast]
            [--audio] [--no-cache] [--cache-dir DIR]
+           [--collision overwrite|suffix|fail]
+           [--timeout SECONDS] [--retries N] [--browser PROFILE] [--quiet]
+           [--config FILE.toml|FILE.json]
 ystt --urls-file FILE [--concurrency N] [same download flags]
 ystt --progress URL    # JSON-lines progress on stderr
-ystt --filename "{artist}-{title}-{quality}" URL
+ystt --filename "{kind}-{index}-{post_id}.{ext}" URL
 ystt --resume URL    # continue a TikTok video from a deterministic .part file
 ```
 
@@ -136,9 +150,13 @@ adaptive ranges for files over 64 MiB. `--no-cache` disables both caches;
 `--cache-dir` shares the file and metadata caches across output directories.
 With `--json`, failures are emitted as a structured `ErrorInfo` object on stderr.
 `--progress` emits the unified `ProgressEvent` stream as JSON lines on stderr.
-For SoundCloud, `--filename` also supports `{artist}`, `{title}`, `{post_id}`
-(track ID) and `{quality}`; playlist files are written in track order. A mixed
-URL file preserves input order while downloading with bounded concurrency.
+`--filename` supports `{author}`/`{artist}`, `{post_id}`, `{title}`,
+`{quality}`, `{kind}`, `{index}` and `{ext}`. `{ext}` is appended only once.
+`--collision suffix` appends `_1`, `_2`, ...; `fail` returns a typed
+`file_exists` error; `overwrite` is the compatible default. SoundCloud playlist
+files are written in track order. A mixed URL file preserves input order while
+downloading with bounded concurrency. `--config` supports TOML or JSON; explicit
+non-default CLI flags win.
 SoundCloud downloads also write `{name}.jpg` next to the audio. The default
 SoundCloud disk cache lives in `<output>/.ystt-cache/soundcloud` (or
 `<cache-dir>/soundcloud`) and removes the audio transfer on repeat runs;
@@ -381,7 +399,6 @@ tests/              offline and local-HTTP integration tests
 - [`docs/INTERNALS.md`](docs/INTERNALS.md): architecture, parser, WAF math,
   transport, caching, API layer and benchmarks.
 - [`AGENTS.md`](AGENTS.md): coding-agent contract, invariants and deployment.
-- [`ROADMAP.md`](ROADMAP.md): practical next steps and explicit non-goals.
 
 ## License
 

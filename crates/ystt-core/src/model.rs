@@ -224,6 +224,38 @@ impl TikTokItem {
                         .copied()
                         .max_by_key(|bitrate| bitrate.bitrate)
                 }
+                QualityPolicy::Efficient => {
+                    let highest = bitrates
+                        .iter()
+                        .copied()
+                        .max_by_key(|bitrate| (bitrate.height, bitrate.width, bitrate.bitrate));
+                    let reference = bitrates
+                        .iter()
+                        .copied()
+                        .filter(|bitrate| is_h264(bitrate.codec.as_deref()))
+                        .max_by_key(|bitrate| (bitrate.height, bitrate.width, bitrate.bitrate))
+                        .or(highest);
+                    let reference = reference?;
+                    let reference_height = reference.height.unwrap_or(0);
+                    let reference_width = reference.width.unwrap_or(0);
+                    let hevc = bitrates
+                        .iter()
+                        .copied()
+                        .filter(|bitrate| is_h265(bitrate.codec.as_deref()))
+                        .filter(|bitrate| {
+                            bitrate.height.unwrap_or(0) >= reference_height
+                                && bitrate.width.unwrap_or(0) >= reference_width
+                                && bitrate.bitrate <= reference.bitrate
+                        })
+                        .max_by_key(|bitrate| (bitrate.height, bitrate.width, bitrate.bitrate));
+                    hevc.or_else(|| {
+                        bitrates
+                            .iter()
+                            .copied()
+                            .filter(|bitrate| is_h264(bitrate.codec.as_deref()))
+                            .max_by_key(|bitrate| (bitrate.height, bitrate.width, bitrate.bitrate))
+                    })
+                }
             };
 
             if let Some(bitrate) = selected
@@ -345,6 +377,13 @@ impl MediaInfo {
     pub fn has_media(&self) -> bool {
         self.video_url.is_some() || !self.photo_urls.is_empty() || self.audio_url.is_some()
     }
+}
+
+fn is_h265(codec: Option<&str>) -> bool {
+    codec.is_some_and(|codec| {
+        let codec = codec.to_ascii_lowercase();
+        codec.contains("h265") || codec.contains("hevc") || codec.contains("bytevc1")
+    })
 }
 
 fn is_h264(codec: Option<&str>) -> bool {
@@ -652,6 +691,10 @@ mod tests {
         assert_eq!(
             item.best_video_url(QualityPolicy::Balanced),
             Some("https://cdn/high-h264")
+        );
+        assert_eq!(
+            item.best_video_url(QualityPolicy::Efficient),
+            Some("https://cdn/low-hevc")
         );
     }
 

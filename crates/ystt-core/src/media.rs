@@ -15,11 +15,12 @@ mod transfer;
 mod validation;
 
 pub use ext::sanitize_filename;
-pub(crate) use ext::{audio_ext, base_filename, mime_for_ext, photo_ext, video_ext};
+pub(crate) use ext::{audio_ext, media_filename, mime_for_ext, photo_ext, video_ext};
 #[cfg(test)]
 pub(crate) use transfer::parse_content_range;
 pub(crate) use transfer::{
-    download_adaptive, download_media_bytes, download_resume, download_single, should_fallback,
+    download_adaptive, download_media_bytes, download_resume, download_single, resume_part_path,
+    should_fallback,
 };
 #[cfg(test)]
 pub(crate) use validation::validate_download;
@@ -100,6 +101,14 @@ pub(crate) async fn download_media(
         .map(|emitter| ProgressTracker::new(emitter, target, None));
 
     let size = match kind {
+        MediaKind::Video
+            if context.resume && context.parallel_ranges && !resume_part_path(path).exists() =>
+        {
+            match download_adaptive(context, url, path, tracker.clone()).await {
+                Ok(size) => size,
+                Err(error) => return Err(error),
+            }
+        }
         MediaKind::Video if context.resume => {
             download_resume(context, url, path, target, tracker.clone()).await?
         }
@@ -178,14 +187,57 @@ mod tests {
     #[test]
     fn filename_template_renders_and_sanitizes() {
         assert_eq!(
-            base_filename(Some("{author}-{post_id}-{quality}"), "u", "123", "best"),
-            "u-123-best"
+            media_filename(
+                Some("{author}-{post_id}-{quality}"),
+                "u",
+                "123",
+                "best",
+                MediaKind::Video,
+                None,
+                "mp4"
+            ),
+            "u-123-best.mp4"
         );
         assert_eq!(
-            base_filename(Some("../../{post_id}"), "u", "123", "best"),
-            "_.._123"
+            media_filename(
+                Some("../../{post_id}"),
+                "u",
+                "123",
+                "best",
+                MediaKind::Video,
+                None,
+                "mp4"
+            ),
+            "_.._123.mp4"
         );
-        assert_eq!(base_filename(None, "u", "123", "balanced"), "tiktok_u_123");
+        assert_eq!(
+            media_filename(None, "u", "123", "balanced", MediaKind::Video, None, "mp4"),
+            "tiktok_u_123.mp4"
+        );
+        assert_eq!(
+            media_filename(
+                None,
+                "u",
+                "123",
+                "balanced",
+                MediaKind::Photo,
+                Some(2),
+                "jpg"
+            ),
+            "tiktok_u_123_photo_2.jpg"
+        );
+        assert_eq!(
+            media_filename(
+                Some("{kind}-{post_id}-{index}.{ext}"),
+                "u",
+                "123",
+                "best",
+                MediaKind::Photo,
+                Some(3),
+                "webp"
+            ),
+            "photo-123-3.webp"
+        );
     }
 
     #[test]

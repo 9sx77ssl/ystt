@@ -4,33 +4,31 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::{StreamExt, stream};
-use http::header::LOCATION;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-use ystt_net::{BrowserHeaders, HttpClient, NetError, RequestKind, RequestOptions};
-use ystt_waf::{WafChallenge, WafSolver};
+use ystt_net::HttpClient;
+use ystt_waf::WafSolver;
 
 use crate::cache::UrlCache;
 use crate::cache_util::FileLock;
-use crate::config::{DownloadOptions, QualityPolicy, YsttConfig};
-use crate::cookie::CookieJar;
+use crate::config::{DownloadOptions, FilenameCollision, QualityPolicy, YsttConfig};
 use crate::error::{PartialFailure, Result, YsttError};
 use crate::file_cache::{CachedFile, FileCache, FileCacheEntry};
 use crate::media::{
-    DownloadedFile, MediaContext, audio_ext, base_filename, download_media, photo_ext, video_ext,
+    DownloadedFile, MediaContext, audio_ext, download_media, media_filename, photo_ext, video_ext,
 };
 use crate::metadata::{MetadataCache, default_metadata_root};
 use crate::model::{MediaInfo, MediaKind, TikTokItem};
-use crate::parse::{PageParse, parse_embed_page, parse_page};
 use crate::progress::{MediaTarget, ProgressEmitter, ProgressStage, next_job_id};
 use crate::soundcloud::{
     SoundCloudAudio, SoundCloudClient, SoundCloudEntity, SoundCloudPlaylistAudio,
     SoundCloudTrackFailure,
 };
-use crate::url::{TikTokUrl, find_post_id_in_html};
+use crate::url::TikTokUrl;
 
 use self::job::DownloadJob;
 use self::options::ResolvedOptions;
+
+mod resolver;
 
 mod batch;
 mod bytes;
@@ -246,12 +244,20 @@ impl Ystt {
         options: &DownloadOptions,
         concurrency: usize,
     ) -> Result<SoundCloudPlaylistAudio> {
+        let started = Instant::now();
         let opts = ResolvedOptions::resolve(&self.config, options);
         let concurrency = concurrency.clamp(1, 8);
         let track_count = playlist.tracks.len();
+        let job_id = next_job_id();
+        let progress = ProgressEmitter::batch(opts.progress.clone(), job_id, track_count);
+        progress.emit(ProgressStage::BatchStarted {
+            total_items: track_count,
+        });
         let mut results: Vec<Option<Result<SoundCloudAudio>>> =
             (0..track_count).map(|_| None).collect();
         let mut failures = Vec::new();
+        let mut completed_tracks = 0usize;
+        let mut failed_tracks = 0usize;
         let mut downloads = stream::iter(playlist.tracks.iter().cloned().enumerate().map(
             |(index, track)| {
                 let client = self.soundcloud.clone();
@@ -274,14 +280,22 @@ impl Ystt {
         .buffer_unordered(concurrency);
         while let Some((index, track, result)) = downloads.next().await {
             if let Err(error) = &result {
+                failed_tracks += 1;
                 failures.push(SoundCloudTrackFailure {
                     track_id: track.id.clone(),
                     title: track.title.clone(),
                     url: track.permalink_url.clone(),
                     error: error.info(),
                 });
+            } else {
+                completed_tracks += 1;
             }
             results[index] = Some(result);
+            progress.emit(ProgressStage::BatchProgress {
+                completed_items: completed_tracks,
+                failed_items: failed_tracks,
+                total_items: track_count,
+            });
         }
         drop(downloads);
         if !opts.allow_partial && !failures.is_empty() {
@@ -313,6 +327,11 @@ impl Ystt {
                     .collect(),
             ));
         }
+        progress.emit(ProgressStage::BatchCompleted {
+            total_ms: millis(started.elapsed()),
+            successes: completed_tracks,
+            failures: failed_tracks,
+        });
         Ok(SoundCloudPlaylistAudio {
             playlist: playlist.clone(),
             tracks,
@@ -558,51 +577,84 @@ impl Ystt {
         };
 
         let spec = quality.as_str();
-        let base = base_filename(
-            opts.filename_template.as_deref(),
-            &info.author.id,
-            &info.post_id,
-            spec,
-        );
         let output_dir = opts.output_dir.clone();
         let video_url = info.video_url.clone();
         let audio_url = info.audio_url.clone();
+        let template = opts.filename_template.as_deref();
+        let collision = opts.filename_collision;
+        let mut reserved = std::collections::HashSet::new();
 
-        let video_context = context.clone();
-        let video_base = base.clone();
-        let video_dir = output_dir.clone();
-        let video_future = async move {
-            match video_url {
-                Some(url) => {
-                    let path = video_dir.join(format!("{video_base}.{}", video_ext(&url)));
-                    Ok::<_, YsttError>(Some(
-                        download_media(
-                            &video_context,
-                            &url,
-                            &path,
-                            MediaKind::Video,
-                            MediaTarget::video(),
-                        )
-                        .await?,
-                    ))
-                }
-                None => Ok(None),
+        let video_path = match &video_url {
+            Some(url) => {
+                let ext = video_ext(url);
+                let path = output_dir.join(media_filename(
+                    template,
+                    &info.author.id,
+                    &info.post_id,
+                    spec,
+                    MediaKind::Video,
+                    None,
+                    &ext,
+                ));
+                Some(planned_output_path(path, collision, &mut reserved).await?)
             }
+            None => None,
         };
 
-        let photo_paths: Vec<(usize, String, PathBuf)> = info
-            .photo_urls
-            .iter()
-            .enumerate()
-            .map(|(index, url)| {
-                (
-                    index,
-                    url.clone(),
-                    output_dir.join(format!("{base}_photo_{}.{}", index + 1, photo_ext(url))),
-                )
-            })
-            .collect();
+        let mut photo_paths: Vec<(usize, String, PathBuf)> =
+            Vec::with_capacity(info.photo_urls.len());
+        for (index, url) in info.photo_urls.iter().enumerate() {
+            let ext = photo_ext(url);
+            let path = output_dir.join(media_filename(
+                template,
+                &info.author.id,
+                &info.post_id,
+                spec,
+                MediaKind::Photo,
+                Some(index + 1),
+                &ext,
+            ));
+            photo_paths.push((
+                index,
+                url.clone(),
+                planned_output_path(path, collision, &mut reserved).await?,
+            ));
+        }
         let photo_count = photo_paths.len();
+
+        let audio_path = match &audio_url {
+            Some(url) if include_audio => {
+                let ext = audio_ext(url);
+                let path = output_dir.join(media_filename(
+                    template,
+                    &info.author.id,
+                    &info.post_id,
+                    spec,
+                    MediaKind::Audio,
+                    None,
+                    &ext,
+                ));
+                Some(planned_output_path(path, collision, &mut reserved).await?)
+            }
+            _ => None,
+        };
+
+        let video_context = context.clone();
+        let video_future = async move {
+            match (video_url, video_path) {
+                (Some(url), Some(path)) => Ok::<_, YsttError>(Some(
+                    download_media(
+                        &video_context,
+                        &url,
+                        &path,
+                        MediaKind::Video,
+                        MediaTarget::video(),
+                    )
+                    .await?,
+                )),
+                _ => Ok(None),
+            }
+        };
 
         let photo_context = context.clone();
         let photos_future = async move {
@@ -642,27 +694,19 @@ impl Ystt {
         };
 
         let audio_context = context.clone();
-        let audio_base = base.clone();
-        let audio_dir = output_dir.clone();
         let audio_future = async move {
-            if !include_audio {
-                return Ok(None);
-            }
-            match audio_url {
-                Some(url) => {
-                    let path = audio_dir.join(format!("{audio_base}_audio.{}", audio_ext(&url)));
-                    Ok(Some(
-                        download_media(
-                            &audio_context,
-                            &url,
-                            &path,
-                            MediaKind::Audio,
-                            MediaTarget::audio(),
-                        )
-                        .await?,
-                    ))
-                }
-                None => Ok(None),
+            match (audio_url, audio_path) {
+                (Some(url), Some(path)) => Ok(Some(
+                    download_media(
+                        &audio_context,
+                        &url,
+                        &path,
+                        MediaKind::Audio,
+                        MediaTarget::audio(),
+                    )
+                    .await?,
+                )),
+                _ => Ok(None),
             }
         };
 
@@ -670,498 +714,13 @@ impl Ystt {
             tokio::try_join!(video_future, photos_future, audio_future)?;
         Ok((video, photos, audio, failures))
     }
-
-    async fn resolve_internal(
-        &self,
-        url: &str,
-        opts: &ResolvedOptions,
-        emitter: &ProgressEmitter,
-    ) -> Result<Resolved> {
-        self.resolve_internal_mode(url, opts, self.config.resolver.use_embed, emitter)
-            .await
-    }
-
-    async fn resolve_internal_mode(
-        &self,
-        url: &str,
-        opts: &ResolvedOptions,
-        allow_embed: bool,
-        emitter: &ProgressEmitter,
-    ) -> Result<Resolved> {
-        let started = Instant::now();
-        let parsed = TikTokUrl::parse(url)?;
-        let signal = opts.signal.as_ref();
-
-        check_cancelled(signal)?;
-
-        let post_id = self.resolve_post_id(&parsed, signal).await?;
-
-        let quality = opts.quality;
-        let cache_key = format!("{post_id}:{}", quality.as_str());
-        let metadata_enabled = opts.metadata_cache;
-
-        if let Some(mut cached) = self.cache.get(&cache_key).await {
-            cached.source_url = url.to_owned();
-            let elapsed = started.elapsed();
-            return Ok(Resolved {
-                info: cached,
-                timings: Timings {
-                    resolve_ms: millis(elapsed),
-                    total_ms: millis(elapsed),
-                    ..Timings::default()
-                },
-                from_cache: true,
-                from_embed: false,
-                cache_key,
-                cookie: None,
-            });
-        }
-
-        if metadata_enabled && let Some(entry) = self.metadata.get(&cache_key).await {
-            let mut info = entry.info;
-            info.source_url = url.to_owned();
-            self.cache.put(cache_key.clone(), info.clone()).await;
-            let elapsed = started.elapsed();
-            return Ok(Resolved {
-                info,
-                timings: Timings {
-                    resolve_ms: millis(elapsed),
-                    total_ms: millis(elapsed),
-                    ..Timings::default()
-                },
-                from_cache: true,
-                from_embed: false,
-                cache_key,
-                cookie: entry.cookie,
-            });
-        }
-
-        let page_url = parsed.page_url(&post_id);
-        let page_url = match &self.config.resolver.page_origin {
-            Some(origin) => page_url.replacen("https://www.tiktok.com", origin, 1),
-            None => page_url,
-        };
-
-        let page_started = Instant::now();
-        let prefer_embed = allow_embed
-            && parsed.kind() != Some(MediaKind::Photo)
-            && quality != QualityPolicy::Best;
-        let mut outcome = if prefer_embed {
-            match self.fetch_embed(&post_id, signal).await? {
-                Some(outcome) => outcome,
-                None => {
-                    self.fetch_detail(&page_url, &post_id, signal, Some(emitter))
-                        .await?
-                }
-            }
-        } else {
-            match self
-                .fetch_detail(&page_url, &post_id, signal, Some(emitter))
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(primary_error) if parsed.kind() != Some(MediaKind::Photo) => {
-                    debug!(?primary_error, "full page failed; trying embed fallback");
-                    match self.fetch_embed(&post_id, signal).await {
-                        Ok(Some(outcome)) => outcome,
-                        _ => return Err(primary_error),
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        outcome.page = page_started
-            .elapsed()
-            .saturating_sub(outcome.waf)
-            .saturating_sub(outcome.parse);
-        let from_embed = outcome.from_embed;
-        let cookie = outcome.cookie.clone();
-        let item = outcome.item;
-
-        let video_url = item.best_video_url(quality).map(str::to_owned);
-        let photo_entries = item.photo_entries();
-        let photo_urls: Vec<String> = photo_entries.iter().map(|(url, _)| url.clone()).collect();
-        let photo_dimensions: Vec<_> = photo_entries.iter().map(|(_, dims)| *dims).collect();
-        let audio_url = item.audio_url().map(str::to_owned);
-        let bitrates = item
-            .video
-            .as_ref()
-            .map(|video| video.bitrates.clone())
-            .unwrap_or_default();
-        let video_width = item.video.as_ref().and_then(|video| video.width);
-        let video_height = item.video.as_ref().and_then(|video| video.height);
-        let duration_sec = item.video.as_ref().and_then(|video| video.duration_sec);
-        let cover_url = item
-            .video
-            .as_ref()
-            .and_then(|video| video.cover_url.clone());
-        let is_slideshow = !item.photos.is_empty();
-        // Photo posts also carry a placeholder `video` object with a relative
-        // URL. If the post has gallery images, photos are the media.
-        let video_url = if photo_urls.is_empty() {
-            video_url
-        } else {
-            None
-        };
-        let is_age_restricted = item.is_content_classified
-            && video_url.is_none()
-            && photo_urls.is_empty()
-            && audio_url.is_none();
-
-        let info = MediaInfo {
-            post_id,
-            source_url: url.to_owned(),
-            page_url,
-            author: item.author,
-            description: item.description,
-            video_url,
-            photo_urls,
-            photo_dimensions,
-            audio_url,
-            is_slideshow,
-            is_age_restricted,
-            music: item.music,
-            bitrates,
-            video_width,
-            video_height,
-            duration_sec,
-            cover_url,
-        };
-
-        if !info.has_media() && !info.is_age_restricted {
-            return Err(YsttError::NoMedia);
-        }
-
-        if info.has_media() {
-            self.cache.put(cache_key.clone(), info.clone()).await;
-            if metadata_enabled
-                && let Err(error) = self
-                    .metadata
-                    .put(&cache_key, &info, outcome.cookie.as_deref())
-                    .await
-            {
-                tracing::warn!(?error, "failed to store metadata cache");
-            }
-        }
-
-        let elapsed = started.elapsed();
-        Ok(Resolved {
-            info,
-            timings: Timings {
-                resolve_ms: millis(elapsed),
-                page_ms: millis(outcome.page),
-                waf_ms: millis(outcome.waf),
-                parse_ms: millis(outcome.parse),
-                total_ms: millis(elapsed),
-                ..Timings::default()
-            },
-            from_cache: false,
-            from_embed,
-            cache_key,
-            cookie,
-        })
-    }
-
-    async fn resolve_post_id(
-        &self,
-        parsed: &TikTokUrl,
-        signal: Option<&CancellationToken>,
-    ) -> Result<String> {
-        match parsed.post_id() {
-            Some(post_id) => Ok(post_id.to_owned()),
-            None if parsed.is_short_link() => {
-                let short_url = parsed
-                    .short_url()
-                    .unwrap_or_else(|| parsed.raw().to_owned());
-                self.resolve_short_link(&short_url, signal).await
-            }
-            None => Err(YsttError::Parse(
-                "URL does not contain a post ID or short-link code".into(),
-            )),
-        }
-    }
-
-    async fn resolve_short_link(
-        &self,
-        short_url: &str,
-        signal: Option<&CancellationToken>,
-    ) -> Result<String> {
-        let headers = BrowserHeaders::build(RequestKind::ShortLink, None, None, None)?;
-        let options = match signal {
-            Some(signal) => RequestOptions::short_link().with_signal(signal.clone()),
-            None => RequestOptions::short_link(),
-        };
-        let response = self.http.get(short_url, headers, options).await?;
-
-        if let Some(location) = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            && let Some(post_id) = crate::url::get_post_id(location)
-        {
-            return Ok(post_id);
-        }
-
-        let status = response.status_u16();
-        if !response.is_success() && !(300..400).contains(&status) {
-            return Err(YsttError::Network(NetError::Status {
-                status,
-                url: short_url.to_owned(),
-            }));
-        }
-
-        let html = response
-            .text(
-                self.config.network.max_page_bytes,
-                self.config.network.http.read_timeout,
-                signal,
-            )
-            .await?;
-
-        find_post_id_in_html(&html)
-            .ok_or_else(|| YsttError::Parse("cannot resolve post ID from short link".into()))
-    }
-
-    async fn fetch_embed(
-        &self,
-        post_id: &str,
-        signal: Option<&CancellationToken>,
-    ) -> Result<Option<FetchOutcome>> {
-        let origin = self
-            .config
-            .resolver
-            .page_origin
-            .as_deref()
-            .unwrap_or("https://www.tiktok.com")
-            .trim_end_matches('/');
-        let url = format!("{origin}/embed/v2/{post_id}");
-        let headers = BrowserHeaders::build(RequestKind::Page, None, None, None)?;
-        let options = match signal {
-            Some(signal) => RequestOptions::page().with_signal(signal.clone()),
-            None => RequestOptions::page(),
-        };
-
-        let started = Instant::now();
-        let response = match self.http.get(&url, headers, options).await {
-            Ok(response) => response,
-            Err(error) => {
-                debug!(?error, "embed request failed; falling back to full page");
-                return Ok(None);
-            }
-        };
-        if !response.is_success() {
-            return Ok(None);
-        }
-
-        let mut cookies = CookieJar::default();
-        for set_cookie in response.set_cookie_headers() {
-            cookies.absorb(&set_cookie);
-        }
-
-        let body_started = Instant::now();
-        let html = match response
-            .text(
-                self.config.network.max_page_bytes,
-                self.config.network.http.read_timeout,
-                signal,
-            )
-            .await
-        {
-            Ok(html) => html,
-            Err(error) => {
-                debug!(?error, "embed body failed; falling back to full page");
-                return Ok(None);
-            }
-        };
-        let body_elapsed = body_started.elapsed();
-        let parse_started = Instant::now();
-        let item = parse_embed_page(&html, post_id);
-        let parse_elapsed = parse_started.elapsed();
-        debug!(
-            headers_ms = started
-                .elapsed()
-                .saturating_sub(body_elapsed + parse_elapsed)
-                .as_millis() as u64,
-            body_ms = body_elapsed.as_millis() as u64,
-            bytes = html.len(),
-            "embed fetched"
-        );
-        Ok(item.map(|item| FetchOutcome {
-            item,
-            page: started.elapsed().saturating_sub(parse_elapsed),
-            waf: Duration::ZERO,
-            parse: parse_elapsed,
-            cookie: cookies.header(),
-            from_embed: true,
-        }))
-    }
-
-    async fn fetch_detail(
-        &self,
-        page_url: &str,
-        expected_post_id: &str,
-        signal: Option<&CancellationToken>,
-        progress: Option<&ProgressEmitter>,
-    ) -> Result<FetchOutcome> {
-        let fetch_started = Instant::now();
-        let mut cookies = CookieJar::default();
-        let mut waf_total = Duration::ZERO;
-        let mut parse_total = Duration::ZERO;
-        let mut last_error: Option<YsttError> = None;
-
-        for attempt in 1..=3u32 {
-            check_cancelled(signal)?;
-
-            let cookie = cookies.header();
-            let headers = BrowserHeaders::build(RequestKind::Page, None, cookie.as_deref(), None)?;
-            let options = match signal {
-                Some(signal) => RequestOptions::page().with_signal(signal.clone()),
-                None => RequestOptions::page(),
-            };
-            let request_started = Instant::now();
-            let response = self.http.get(page_url, headers, options).await?;
-            let headers_elapsed = request_started.elapsed();
-            let status = response.status_u16();
-
-            for set_cookie in response.set_cookie_headers() {
-                cookies.absorb(&set_cookie);
-            }
-
-            if matches!(status, 404 | 410) {
-                return Err(YsttError::Unavailable(format!("HTTP {status}")));
-            }
-            if status == 429 || status >= 500 {
-                last_error = Some(YsttError::Network(NetError::Status {
-                    status,
-                    url: page_url.to_owned(),
-                }));
-                if attempt < 3 {
-                    sleep_or_cancel(Duration::from_millis(250 * u64::from(attempt)), signal)
-                        .await?;
-                    continue;
-                }
-                break;
-            }
-
-            let version = response.version();
-            let body_started = Instant::now();
-            let html = response
-                .text(
-                    self.config.network.max_page_bytes,
-                    self.config.network.http.read_timeout,
-                    signal,
-                )
-                .await?;
-            debug!(
-                attempt,
-                ?version,
-                headers_ms = headers_elapsed.as_millis() as u64,
-                body_ms = body_started.elapsed().as_millis() as u64,
-                bytes = html.len(),
-                "page fetched"
-            );
-
-            let parse_started = Instant::now();
-            let parsed = parse_page(&html, expected_post_id);
-            parse_total += parse_started.elapsed();
-
-            match parsed? {
-                PageParse::Item(item) => {
-                    let item = *item;
-                    let page_total = fetch_started.elapsed();
-                    let page = page_total
-                        .saturating_sub(waf_total)
-                        .saturating_sub(parse_total);
-                    return Ok(FetchOutcome {
-                        item,
-                        page,
-                        waf: waf_total,
-                        parse: parse_total,
-                        cookie: cookies.header(),
-                        from_embed: false,
-                    });
-                }
-                PageParse::NoItem => {
-                    if let Some(challenge) =
-                        WafChallenge::parse_html(&html, self.config.waf.max_iterations)?
-                    {
-                        debug!("solving TikTok WAF challenge");
-                        let fingerprint = challenge.fingerprint();
-                        if let Some(cookie) = self
-                            .waf_cookies
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .get(&fingerprint)
-                            .cloned()
-                        {
-                            cookies.set(&cookie);
-                            continue;
-                        }
-                        if let Some(progress) = progress {
-                            progress.emit(ProgressStage::WafChallenge { attempt });
-                        }
-                        let solver = self.waf.clone();
-                        let challenge_for_worker = challenge.clone();
-                        let solve_started = Instant::now();
-                        let cookie = tokio::task::spawn_blocking(move || {
-                            solver.solve(&challenge_for_worker)
-                        })
-                        .await
-                        .map_err(|error| YsttError::Internal(error.to_string()))??;
-                        let solve_elapsed = solve_started.elapsed();
-                        waf_total += solve_elapsed;
-                        if let Some(progress) = progress {
-                            progress.emit(ProgressStage::WafSolved {
-                                elapsed_ms: millis(solve_elapsed),
-                            });
-                        }
-                        {
-                            let mut cache = self
-                                .waf_cookies
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if cache.len() >= 64 {
-                                cache.clear();
-                            }
-                            cache.insert(fingerprint, cookie.clone());
-                        }
-                        cookies.set(&cookie);
-                        continue;
-                    }
-
-                    if ystt_waf::looks_like_external_bot_page(&html) {
-                        return Err(YsttError::Parse(
-                            "external bot/CAPTCHA page is not supported".into(),
-                        ));
-                    }
-
-                    last_error = Some(if status == 200 {
-                        YsttError::Parse("no item payload and no WAF challenge".into())
-                    } else {
-                        YsttError::Network(NetError::Status {
-                            status,
-                            url: page_url.to_owned(),
-                        })
-                    });
-                    if attempt < 3 {
-                        sleep_or_cancel(Duration::from_millis(250 * u64::from(attempt)), signal)
-                            .await?;
-                        continue;
-                    }
-                }
-            }
-        }
-
-        Err(last_error
-            .unwrap_or_else(|| YsttError::Parse("cannot parse TikTok page after retries".into())))
-    }
 }
 
 mod builder;
 
 pub use builder::YsttBuilder;
 
-struct Resolved {
+pub(crate) struct Resolved {
     info: MediaInfo,
     timings: Timings,
     from_cache: bool,
@@ -1170,7 +729,7 @@ struct Resolved {
     cookie: Option<String>,
 }
 
-struct FetchOutcome {
+pub(crate) struct FetchOutcome {
     item: TikTokItem,
     page: Duration,
     waf: Duration,
@@ -1203,6 +762,46 @@ async fn sleep_or_cancel(duration: Duration, signal: Option<&CancellationToken>)
 
 fn millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+async fn planned_output_path(
+    path: PathBuf,
+    collision: FilenameCollision,
+    reserved: &mut std::collections::HashSet<PathBuf>,
+) -> Result<PathBuf> {
+    if collision == FilenameCollision::Overwrite {
+        return Ok(path);
+    }
+    let mut candidate = path.clone();
+    let mut counter = 0u32;
+    loop {
+        let exists = tokio::fs::try_exists(&candidate).await?;
+        if !exists && reserved.insert(candidate.clone()) {
+            return Ok(candidate);
+        }
+        if collision == FilenameCollision::Fail {
+            return Err(YsttError::FileExists(candidate));
+        }
+        counter += 1;
+        if counter > 10_000 {
+            return Err(YsttError::Config(
+                "could not find a free output filename".into(),
+            ));
+        }
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("download");
+        candidate = path.with_file_name(if extension.is_empty() {
+            format!("{stem}_{counter}")
+        } else {
+            format!("{stem}_{counter}.{extension}")
+        });
+    }
 }
 
 fn file_cache_key(post_id: &str, quality: QualityPolicy, include_audio: bool) -> String {

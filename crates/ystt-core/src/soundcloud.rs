@@ -1073,7 +1073,7 @@ fn candidate_transcodings(
     quality: QualityPolicy,
 ) -> Vec<&SoundCloudTranscoding> {
     let order: &[&str] = match quality {
-        QualityPolicy::Best | QualityPolicy::Balanced => &[
+        QualityPolicy::Best | QualityPolicy::Balanced | QualityPolicy::Efficient => &[
             "aac_160k", "mp3_1_0", "aac_96k", "mp3_0_1", "opus_1_0", "opus_0_0", "abr_sq",
         ],
         QualityPolicy::Compatible => &[
@@ -1501,6 +1501,22 @@ mod tests {
             Some("https://cdn.test/high.m3u8")
         );
         assert!(parsed.segments.is_empty());
+    }
+
+    #[test]
+    fn output_formats_cover_aac_mp3_and_opus() {
+        assert_eq!(
+            output_format(&track("aac_160k", "hls", "audio/mp4")),
+            ("audio/mp4", "m4a")
+        );
+        assert_eq!(
+            output_format(&track("mp3_1_0", "progressive", "audio/mpeg")),
+            ("audio/mpeg", "mp3")
+        );
+        assert_eq!(
+            output_format(&track("opus_1_0", "hls", "audio/ogg")),
+            ("audio/ogg", "ogg")
+        );
     }
 
     #[test]

@@ -104,6 +104,10 @@ pub struct BatchRequest {
     pub urls: Vec<String>,
     /// Per-item concurrency (server-capped).
     pub concurrency: Option<usize>,
+    /// Optional wall-clock timeout for each item, in milliseconds.
+    pub item_timeout_ms: Option<u64>,
+    /// Optional media retry override for each item.
+    pub item_retries: Option<u32>,
     /// Shared per-request download policy.
     #[serde(flatten)]
     pub options: DownloadOptionsInput,

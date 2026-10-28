@@ -1,6 +1,7 @@
 //! HTTP route handlers and media streaming.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
@@ -110,7 +111,13 @@ pub async fn batch(
     Ok(Json(
         state
             .downloader
-            .batch(request.urls, request.concurrency, &request.options)
+            .batch(
+                request.urls,
+                request.concurrency,
+                request.item_timeout_ms.map(Duration::from_millis),
+                request.item_retries,
+                &request.options,
+            )
             .await?,
     ))
 }
