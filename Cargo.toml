@@ -9,7 +9,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.14.0"
+version = "1.15.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -52,8 +52,10 @@ tokio-util = { version = "0.7.20", features = ["rt"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 url = "2.5.8"
-wreq = { version = "6.0.0-rc.31", features = ["stream", "gzip", "brotli", "deflate", "zstd", "tracing"] }
-wreq-util = "3.0.0-rc.14"
+wreq = { version = "0.16.1", features = ["stream", "gzip", "brotli", "deflate", "zstd", "tracing"] }
+# Pinned to upstream main for Chrome 154 / Firefox 152 profiles; the
+# published 0.2.0 release stops at Chrome 149.
+wreq-util = { git = "https://github.com/0x676e67/wreq-util", rev = "5715529002738f46eea86a7271f918f9374d3582" }
 
 [package]
 name = "ystt"
@@ -92,3 +94,10 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 opt-level = 3
+
+[patch.crates-io]
+# wreq-util main tracks the upstream wreq/btls development pair needed for
+# Chrome 154 trust-anchor profiles. Keep both revisions pinned.
+wreq = { git = "https://github.com/0x676e67/wreq", rev = "cd76bcdf1307153de289d34e072528bdf0510a3b" }
+btls = { git = "https://github.com/0x676e67/btls", rev = "129887582a538b8f4dcf371d15c953335312ca37" }
+btls-sys = { git = "https://github.com/0x676e67/btls", rev = "129887582a538b8f4dcf371d15c953335312ca37" }

@@ -92,7 +92,7 @@ The integration harness uses plain HTTP on loopback and therefore requires the
 
 - `TransportPolicy::Auto` is the default: HTTP/2 via ALPN, HTTP/1.1 fallback for
   H1-only CDN hosts.
-- Browser emulation defaults to Chrome 149.
+- Browser emulation defaults to Chrome 154.
 - One shared HTTP client/connection pool per `Ystt`.
 - `Http2Tuning` may change connection window/keep-alive only; never alter the
   browser fingerprint.

@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn http2_tuning_keeps_profile_settings() {
-        let mut emulation = crate::config::BrowserProfile::Chrome149
+        let mut emulation = crate::config::BrowserProfile::Chrome154
             .emulation()
             .into_emulation();
         let before = emulation.http2_options.as_ref().unwrap().clone();

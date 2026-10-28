@@ -333,7 +333,7 @@ never accepted.
 
 `Http2Tuning` can adjust the connection window and keep-alive values while
 keeping the browser's TLS/JA3/JA4 and HTTP/2 SETTINGS fingerprint intact. It is
-opt-in; the default is the untouched Chrome 149 profile.
+opt-in; the default is the untouched Chrome 154 profile.
 
 ## Performance
 

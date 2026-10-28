@@ -19,24 +19,9 @@ dependencies = [
 
 [[package]]
 name = "alloc-no-stdlib"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
-
-[[package]]
-name = "alloc-no-stdlib"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
-
-[[package]]
-name = "alloc-stdlib"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
-dependencies = [
- "alloc-no-stdlib 2.0.4",
-]
 
 [[package]]
 name = "alloc-stdlib"
@@ -44,7 +29,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
 dependencies = [
- "alloc-no-stdlib 3.0.0",
+ "alloc-no-stdlib",
 ]
 
 [[package]]
@@ -227,34 +212,13 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "8.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
-dependencies = [
- "alloc-no-stdlib 2.0.4",
- "alloc-stdlib 0.2.4",
- "brotli-decompressor 5.0.3",
-]
-
-[[package]]
-name = "brotli"
 version = "9.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6737ce8b81460bf9407909f73ff50bf13f7cb8577e1e76715f57ed0eba58ba44"
 dependencies = [
- "alloc-no-stdlib 3.0.0",
- "alloc-stdlib 0.3.0",
- "brotli-decompressor 6.2.0",
-]
-
-[[package]]
-name = "brotli-decompressor"
-version = "5.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
-dependencies = [
- "alloc-no-stdlib 2.0.4",
- "alloc-stdlib 0.2.4",
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
 ]
 
 [[package]]
@@ -263,15 +227,14 @@ version = "6.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34c6783f42c21c952ad7112b354f0ba2f10760e9decea5b1b60523d6e270faaf"
 dependencies = [
- "alloc-no-stdlib 3.0.0",
- "alloc-stdlib 0.3.0",
+ "alloc-no-stdlib",
+ "alloc-stdlib",
 ]
 
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c5e60b8c8d282c86360cab651ded04ab0335a7b5390c8d34145cbeab8cacf5f"
+source = "git+https://github.com/0x676e67/btls?rev=129887582a538b8f4dcf371d15c953335312ca37#129887582a538b8f4dcf371d15c953335312ca37"
 dependencies = [
  "bitflags",
  "btls-sys",
@@ -283,8 +246,7 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b1b8638a2e1c38a5ae4efa90ae57e643baec35a30d03fc5b399b893adc4954b"
+source = "git+https://github.com/0x676e67/btls?rev=129887582a538b8f4dcf371d15c953335312ca37#129887582a538b8f4dcf371d15c953335312ca37"
 dependencies = [
  "bindgen",
  "cmake",
@@ -324,6 +286,15 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "chromium-roots"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d84a1957f8bce40731d95faaf3c444a5ece832d26698cbeaa788d38c3bd01f86"
+dependencies = [
+ "rustls-pki-types",
+]
 
 [[package]]
 name = "clang-sys"
@@ -397,7 +368,7 @@ version = "0.4.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cae36683101b2899f48bd31f8db9839437356188e3b1ff23096e73dab09ba8fe"
 dependencies = [
- "brotli 9.1.0",
+ "brotli",
  "compression-core",
  "flate2",
  "memchr",
@@ -1455,7 +1426,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -1613,6 +1584,24 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
+ "bitflags",
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
+dependencies = [
  "async-compression",
  "bitflags",
  "bytes",
@@ -1620,12 +1609,12 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "percent-encoding",
  "pin-project-lite",
  "tokio",
  "tokio-util",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -1819,15 +1808,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "webpki-root-certs"
-version = "1.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1884,13 +1864,13 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wreq"
-version = "6.0.0-rc.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b100d81c46113fa7f0719e43b26b13264b38589a4f059e6ebfccb5308159336"
+version = "0.16.1"
+source = "git+https://github.com/0x676e67/wreq?rev=cd76bcdf1307153de289d34e072528bdf0510a3b#cd76bcdf1307153de289d34e072528bdf0510a3b"
 dependencies = [
  "btls",
  "btls-sys",
  "bytes",
+ "chromium-roots",
  "futures-util",
  "http",
  "http-body",
@@ -1908,10 +1888,9 @@ dependencies = [
  "tokio-btls",
  "tokio-util",
  "tower",
- "tower-http",
+ "tower-http 0.7.1",
  "tracing",
  "url",
- "webpki-root-certs",
  "wreq-proto",
  "wreq-rt",
 ]
@@ -1950,11 +1929,10 @@ dependencies = [
 
 [[package]]
 name = "wreq-util"
-version = "3.0.0-rc.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d8d73c75be86fbde675988dbe5cb15f02567025c13f6ffab910361ad1ba6c89"
+version = "0.2.0"
+source = "git+https://github.com/0x676e67/wreq-util?rev=5715529002738f46eea86a7271f918f9374d3582#5715529002738f46eea86a7271f918f9374d3582"
 dependencies = [
- "brotli 8.0.4",
+ "brotli",
  "flate2",
  "typed-builder",
  "wreq",
@@ -1992,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "ystt"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "base64",
  "serde_json",
@@ -2021,7 +1999,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
- "tower-http",
+ "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -2031,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "ystt-cli"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "clap",
  "futures-util",
@@ -2048,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "ystt-core"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -2071,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "ystt-net"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2086,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "ystt-waf"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "base64",
  "itoa",

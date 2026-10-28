@@ -65,15 +65,17 @@ pub struct Http2Tuning {
 /// shows a concrete benefit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BrowserProfile {
-    /// Latest Chrome profile in the pinned `wreq-util` release.
+    /// Latest Chrome profile in the pinned `wreq-util` revision.
     #[default]
+    Chrome154,
+    /// Previous Chrome profile, useful as a fallback.
     Chrome149,
     /// Slightly older Chrome profile, useful as a fallback.
     Chrome136,
     /// Chrome 131, the profile used by several anti-bot test suites.
     Chrome131,
     /// Latest Firefox profile.
-    Firefox151,
+    Firefox152,
     /// Latest Safari profile.
     Safari26_4,
 }
@@ -82,10 +84,11 @@ impl BrowserProfile {
     /// Map the profile to a `wreq-util` emulation preset.
     pub fn emulation(self) -> Emulation {
         let (profile, platform) = match self {
+            Self::Chrome154 => (Profile::Chrome154, Platform::Windows),
             Self::Chrome149 => (Profile::Chrome149, Platform::Windows),
             Self::Chrome136 => (Profile::Chrome136, Platform::Windows),
             Self::Chrome131 => (Profile::Chrome131, Platform::Windows),
-            Self::Firefox151 => (Profile::Firefox151, Platform::Windows),
+            Self::Firefox152 => (Profile::Firefox152, Platform::Windows),
             Self::Safari26_4 => (Profile::Safari26_4, Platform::MacOS),
         };
         Emulation::builder()
@@ -97,10 +100,11 @@ impl BrowserProfile {
     /// Stable human-readable name for logs and CLI output.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Chrome154 => "chrome_154",
             Self::Chrome149 => "chrome_149",
             Self::Chrome136 => "chrome_136",
             Self::Chrome131 => "chrome_131",
-            Self::Firefox151 => "firefox_151",
+            Self::Firefox152 => "firefox_152",
             Self::Safari26_4 => "safari_26.4",
         }
     }
@@ -111,10 +115,11 @@ impl std::str::FromStr for BrowserProfile {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "chrome149" | "chrome_149" | "chrome" => Ok(Self::Chrome149),
+            "chrome154" | "chrome_154" | "chrome" => Ok(Self::Chrome154),
+            "chrome149" | "chrome_149" => Ok(Self::Chrome149),
             "chrome136" | "chrome_136" => Ok(Self::Chrome136),
             "chrome131" | "chrome_131" => Ok(Self::Chrome131),
-            "firefox151" | "firefox_151" | "firefox" => Ok(Self::Firefox151),
+            "firefox152" | "firefox_152" | "firefox" => Ok(Self::Firefox152),
             "safari26_4" | "safari" => Ok(Self::Safari26_4),
             other => Err(format!("unknown browser profile: {other}")),
         }
@@ -184,8 +189,9 @@ mod tests {
 
     #[test]
     fn profile_names_are_stable() {
+        assert_eq!(BrowserProfile::Chrome154.as_str(), "chrome_154");
         assert_eq!(BrowserProfile::Chrome149.as_str(), "chrome_149");
-        assert_eq!(BrowserProfile::Firefox151.as_str(), "firefox_151");
+        assert_eq!(BrowserProfile::Firefox152.as_str(), "firefox_152");
     }
 
     #[test]
@@ -208,6 +214,7 @@ mod tests {
     #[test]
     fn defaults_are_conservative() {
         let config = HttpClientConfig::default();
+        assert_eq!(config.browser, BrowserProfile::Chrome154);
         assert_eq!(config.retries, 2);
         assert!(config.no_proxy);
         assert_eq!(config.per_host_concurrency, 2);

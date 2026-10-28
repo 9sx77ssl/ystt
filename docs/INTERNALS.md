@@ -253,7 +253,7 @@ hard safety bound (default 2,000,000).
 
 ## 4. HTTP and anti-bot
 
-- `wreq` + `wreq-util`; default Chrome 149 on Windows;
+- `wreq` + `wreq-util`; default Chrome 154 on Windows;
 - BoringSSL, header-case preservation, HTTP/2 settings and ALPN emulation;
 - transport policy defaults to **Auto**: ALPN prefers HTTP/2 and automatically
   uses HTTP/1.1 for H1-only CDNs; HTTPS is required in production;

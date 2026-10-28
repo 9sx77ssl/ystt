@@ -351,7 +351,7 @@ let batch = ystt
 
 ## HTTP/2 tuning
 
-Default transport settings are the untouched Chrome 149 profile. The optional
+Default transport settings are the untouched Chrome 154 profile. The optional
 `Http2Tuning` changes only connection-window and keep-alive behavior:
 
 ```rust
